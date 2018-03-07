@@ -556,6 +556,9 @@ def parse_args(argv, namespace):
         main_parser.error('a command is required')
 
 def main():
+    if os.geteuid() == 0:
+        abort('cannot be executed as a root user')
+
     # Assign the parsed args to the EtcMerger instance.
     merger = EtcMerger()
     parse_args(sys.argv, merger)
