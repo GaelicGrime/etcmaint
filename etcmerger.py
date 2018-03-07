@@ -36,7 +36,41 @@ def path_sha1(path):
         h.update(f.read())
     return h.digest()
 
-def repo_name():
+def list_files(path, suffixes=None, prefixes=None):
+    """List of names of regular files in path.
+
+    Exclude file names that are a match for one of the suffixes in
+    'suffixes' and file names that are a match for one of the prefixes in
+    'prefixes'.
+    """
+
+    flist = []
+    suffixes_len = len(suffixes) if suffixes is not None else 0
+    prefixes_len = len(prefixes) if prefixes is not None else 0
+    with change_cwd(path):
+        for root, dirs, files in os.walk('.'):
+            for fname in files:
+                if fname.endswith('.pacnew'):
+                    continue
+                abspath = os.path.normpath(os.path.join(root, fname))
+                if os.path.isdir(abspath):
+                    continue
+                # Exclude files ending with one of the suffixes.
+                if suffixes_len:
+                    if (len(list(itertools.takewhile(lambda x: not x or
+                            not abspath.endswith(x), suffixes))) !=
+                                suffixes_len):
+                        continue
+                # Exclude files starting with one of the prefixes.
+                if prefixes_len:
+                    if (len(list(itertools.takewhile(lambda x: not x or
+                            not abspath.startswith(x), prefixes))) !=
+                                prefixes_len):
+                        continue
+                flist.append(abspath)
+    return flist
+
+def repository_dir():
     xdg_data_home = os.environ.get('XDG_DATA_HOME')
     if xdg_data_home is None:
         home = os.environ.get('HOME')
@@ -44,8 +78,28 @@ def repo_name():
             print('Error: HOME environment variable not set', file=sys.stderr)
             sys.exit(1)
         xdg_data_home = os.path.join(home, '.local/share')
-    repo = os.path.join(xdg_data_home, 'etcmerger')
-    return repo
+    return os.path.join(xdg_data_home, 'etcmerger')
+
+def run_cmd(cmd, dry_run=False):
+    if dry_run:
+        print(cmd)
+        return
+
+    # Assume there may be only one double quoted argument and that it is
+    # at the end of the command.
+    qs = cmd.split('"', maxsplit=1)
+    if len(qs) == 2:
+        cmd = qs[0].split()
+        cmd.append(qs[1].strip('"'))
+    else:
+        cmd = cmd.split()
+
+    try:
+        output = check_output(cmd, universal_newlines=True, stderr=STDOUT)
+    except CalledProcessError as e:
+        output = str(e) + '\n' + e.output.strip('\n')
+        abort(output)
+    return output
 
 @contextlib.contextmanager
 def change_cwd(path):
@@ -57,12 +111,66 @@ def change_cwd(path):
     finally:
         os.chdir(saved_dir)
 
+class Git():
+    """An etcmerger git repository."""
+
+    def __init__(self, repodir, dry_run):
+        self.repodir = repodir
+        self.dry_run = dry_run
+
+    def init(self):
+        """Create the git repository directory if it does not exist."""
+        if os.path.isdir(self.repodir) and os.listdir(self.repodir):
+            abort('%s is not empty' % self.repodir)
+        if not os.path.isdir(self.repodir):
+            os.makedirs(self.repodir)
+        self.git_cmd('init')
+
+    def assert_exists(self):
+        self.git_cmd('status', do_print=False)
+
+    def git_cmd(self, cmd, do_print=True):
+        git_dir = os.path.join(self.repodir, '.git')
+        cmd = 'git --git-dir=%s --work-tree=%s %s' % (git_dir, self.repodir,
+                                                      cmd)
+        output = run_cmd(cmd, self.dry_run)
+        if do_print:
+            output = output.strip('\n')
+            if output:
+                print(output)
+        return output
+
+    def add_file(self, path, content, commit_msg):
+        path = os.path.join(self.repodir, path)
+        with open(path, 'w') as f:
+            f.write(dedent(content))
+        self.git_cmd('add %s' % path)
+        self.git_cmd('commit -m "%s"' % commit_msg)
+
+    def tracked_files(self, branch):
+        """Return a dictionary of the tracked files in this branch."""
+        d = {}
+        ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
+                               branch, do_print=False)
+
+        self.git_cmd('checkout %s' % branch, do_print=False)
+        for fname in ls_tree.split('\n'):
+            path = os.path.join(self.repodir, fname)
+            if os.path.isfile(path):
+                d[fname] = path_sha1(path)
+        return d
+
+    @property
+    def branches(self):
+        branches = self.git_cmd('branch --list', do_print=False)
+        return [x.strip(' *') for x in branches.split('\n')]
+
 class Timestamp():
     def __init__(self, merger):
         self.merger = merger
         self.fname = '.etcmerger_timestamp'
         self.prefix = 'TIMESTAMP='
-        self.path = os.path.join(merger.repo, self.fname)
+        self.path = os.path.join(merger.repodir, self.fname)
 
     def new(self):
         """Create the timestamp file."""
@@ -72,7 +180,7 @@ class Timestamp():
             # the master-tmp (resp. etc-tmp) branch.
             TIMESTAMP=0
         """
-        self.merger.add_file(self.fname, content, 'Add the timestamp')
+        self.merger.repo.add_file(self.fname, content, 'Add the timestamp')
 
     def abort_corrupted(self):
         abort("the '%s' timestamp file is corrupted" % self.fname)
@@ -90,7 +198,7 @@ class Timestamp():
         if not prefix_found:
             self.abort_corrupted()
         content = ''.join(lines)
-        self.merger.add_file(self.fname, content, 'Update the timestamp')
+        self.merger.repo.add_file(self.fname, content, 'Update the timestamp')
 
     @property
     def value(self):
@@ -104,7 +212,7 @@ class EtcMerger():
     """Provide methods to implement the commands."""
 
     def __init__(self):
-        self.repo = repo_name()
+        self.repodir = repository_dir()
         self.timestamp = Timestamp(self)
 
     def init(self):
@@ -115,114 +223,25 @@ class EtcMerger():
             with open('/etc/pacman.conf') as f:
                 cfg.read_file(f)
             self.cachedir = cfg['options']['CacheDir']
+        self.repo = Git(self.repodir, self.dry_run)
 
     def run(self):
         """Run the etcmerger command."""
         self.init()
         self.func(self)
 
-    def run_cmd(self, cmd):
-        if self.dry_run:
-            print(cmd)
-            return
-
-        # Assume there may be only one double quoted argument and that it is
-        # at the end of the command.
-        qs = cmd.split('"', maxsplit=1)
-        if len(qs) == 2:
-            cmd = qs[0].split()
-            cmd.append(qs[1].strip('"'))
-        else:
-            cmd = cmd.split()
-
-        try:
-            output = check_output(cmd, universal_newlines=True, stderr=STDOUT)
-        except CalledProcessError as e:
-            output = str(e) + '\n' + e.output.strip('\n')
-            abort(output)
-        return output
-
-    def git_cmd(self, cmd, do_print=True):
-        git_dir = os.path.join(self.repo, '.git')
-        cmd = 'git --git-dir=%s --work-tree=%s %s' % (git_dir, self.repo, cmd)
-        output = self.run_cmd(cmd)
-        if do_print:
-            output = output.strip('\n')
-            if output:
-                print(output)
-        return output
-
-    def add_file(self, path, content, commit_msg):
-        path = os.path.join(self.repo, path)
-        with open(path, 'w') as f:
-            f.write(dedent(content))
-        self.git_cmd('add %s' % path)
-        self.git_cmd('commit -m "%s"' % commit_msg)
-
-    def tracked_files(self, branch):
-        """Return a dictionary of the tracked files in this branch."""
-        d = {}
-        ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
-                               branch, do_print=False)
-
-        self.git_cmd('checkout %s' % branch, do_print=False)
-        for fname in ls_tree.split('\n'):
-            path = os.path.join(self.repo, fname)
-            if os.path.isfile(path):
-                d[fname] = path_sha1(path)
-        return d
-
-    def list_files(self, path, suffixes=None, prefixes=None):
-        """List of names of regular files in path.
-
-        Exclude file names that are a match for one of the suffixes in
-        'suffixes' and file names that are a match for one of the prefixes in
-        'prefixes'.
-        """
-
-        flist = []
-        suffixes_len = len(suffixes) if suffixes is not None else 0
-        prefixes_len = len(prefixes) if prefixes is not None else 0
-        with change_cwd(path):
-            for root, dirs, files in os.walk('.'):
-                for fname in files:
-                    if fname.endswith('.pacnew'):
-                        continue
-                    abspath = os.path.normpath(os.path.join(root, fname))
-                    if os.path.isdir(abspath):
-                        continue
-                    # Exclude files ending with one of the suffixes.
-                    if suffixes_len:
-                        if (len(list(itertools.takewhile(lambda x: not x or
-                                not abspath.endswith(x), suffixes))) !=
-                                    suffixes_len):
-                            continue
-                    # Exclude files starting with one of the prefixes.
-                    if prefixes_len:
-                        if (len(list(itertools.takewhile(lambda x: not x or
-                                not abspath.startswith(x), prefixes))) !=
-                                    prefixes_len):
-                            continue
-                    flist.append(abspath)
-        return flist
-
     def cmd_init(self):
         """Initialize the git repository."""
-        # Create the git repository directory if it does not exist.
-        if not os.path.isdir(self.repo):
-            os.makedirs(self.repo)
-        if os.listdir(self.repo):
-            abort('%s is not empty' % self.repo)
-        self.git_cmd('init')
+        self.repo.init()
 
         # Add .gitignore.
         gitignore = """\
             *.swp
         """
-        self.add_file('.gitignore', gitignore, 'Creation')
+        self.repo.add_file('.gitignore', gitignore, 'Creation')
 
         # Create the etc branch.
-        self.git_cmd('checkout -b etc')
+        self.repo.git_cmd('checkout -b etc')
 
         # Create the timestamp file in the etc branch.
         self.timestamp.new()
@@ -237,6 +256,7 @@ class EtcMerger():
 
     def cmd_update(self):
         """Update the repository."""
+        self.repo.assert_exists()
         self.create_tmp_branches()
         cherry_pick = self.scan_cachedir()
         if cherry_pick:
@@ -251,59 +271,57 @@ class EtcMerger():
 
         Exclude pacnew, pacsave and pacorig files.
         """
+
+        self.repo.assert_exists()
         if self.use_etc_tmp:
-            if 'etc-tmp' in self.branches:
-                self.git_cmd('checkout etc-tmp', do_print=False)
+            if 'etc-tmp' in self.repo.branches:
+                self.repo.git_cmd('checkout etc-tmp', do_print=False)
             else:
                 print('The etc-tmp branch does not exist')
                 return
         else:
-            self.git_cmd('checkout etc', do_print=False)
+            self.repo.git_cmd('checkout etc', do_print=False)
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = self.list_files('/etc', suffixes=suffixes,
+        etc_files = list_files('/etc', suffixes=suffixes,
                                     prefixes=self.exclude)
-        repo_files = self.list_files(os.path.join(self.repo, 'etc'))
+        repo_files = list_files(os.path.join(self.repodir, 'etc'))
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
-        self.git_cmd('checkout master', do_print=False)
+        self.repo.git_cmd('checkout master', do_print=False)
 
     def cmd_sync(self):
         """Synchronize /etc with the master branch."""
+        self.repo.assert_exists()
         self.finalize()
         print('Command sync ok')
-
-    @property
-    def branches(self):
-        branches = self.git_cmd('branch --list', do_print=False)
-        return [x.strip(' *') for x in branches.split('\n')]
 
     def create_tmp_branches(self):
         print('Create the master-tmp and etc-tmp branches')
         for branch in ('etc', 'master'):
             tmp_branch = '%s-tmp' % branch
-            if tmp_branch in self.branches:
-                self.git_cmd('branch --delete --force %s' % tmp_branch)
-            self.git_cmd('checkout %s' % branch, do_print=False)
-            self.git_cmd('branch %s' % tmp_branch)
+            if tmp_branch in self.repo.branches:
+                self.repo.git_cmd('branch --delete --force %s' % tmp_branch)
+            self.repo.git_cmd('checkout %s' % branch, do_print=False)
+            self.repo.git_cmd('branch %s' % tmp_branch)
 
     def remove_tmp_branches(self):
-        if not 'master-tmp' in self.branches:
+        if not 'master-tmp' in self.repo.branches:
             return False
 
         print('Remove the master-tmp and etc-tmp branches')
         # Do a fast-forward merge.
         for branch in ('master', 'etc'):
             tmp_branch = '%s-tmp' % branch
-            self.git_cmd('checkout %s' % branch, do_print=False)
-            self.git_cmd('merge %s' % tmp_branch)
-            self.git_cmd('branch --delete %s' % tmp_branch)
+            self.repo.git_cmd('checkout %s' % branch, do_print=False)
+            self.repo.git_cmd('merge %s' % tmp_branch)
+            self.repo.git_cmd('branch --delete %s' % tmp_branch)
         return True
 
     def finalize(self):
         if self.remove_tmp_branches():
             print('Update the timestamp')
             self.timestamp.now()
-            self.git_cmd('checkout master')
+            self.repo.git_cmd('checkout master')
 
     def new_packages(self):
         """Return the packages newer than the timestamp."""
@@ -350,18 +368,18 @@ class EtcMerger():
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
                 try:
-                    sha1_of_previous = path_sha1(os.path.join(self.repo,
+                    sha1_of_previous = path_sha1(os.path.join(self.repodir,
                                                               tarinfo.name))
                 except OSError:
                     sha1_of_previous = b''
                 extracted[tarinfo.name] = sha1_of_previous
-            tar.extractall(self.repo,
+            tar.extractall(self.repodir,
                            members=etc_files_filter(tar.getmembers()))
             for fname in extracted:
                 if fname not in tracked:
                     # Ensure that the file can be overwritten on a next
                     # 'update' command.
-                    path = os.path.join(self.repo, fname)
+                    path = os.path.join(self.repodir, fname)
                     mode = os.stat(path).st_mode
                     if mode & RW_ACCESS != RW_ACCESS:
                         os.chmod(path, mode | RW_ACCESS)
@@ -393,8 +411,8 @@ class EtcMerger():
         # Extract the etc files from each package into the etc-tmp branch.
         # Note that tracked_files() has the side-effect of checking out the
         # corresponding branch.
-        master_tracked = self.tracked_files('master-tmp')
-        etc_tracked = self.tracked_files('etc-tmp')
+        master_tracked = self.repo.tracked_files('master-tmp')
+        etc_tracked = self.repo.tracked_files('etc-tmp')
         extracted = self.extract(self.new_packages(), etc_tracked)
 
         # Implement the algorithm.
@@ -402,7 +420,7 @@ class EtcMerger():
         new_master = []
         cherry_pick = []
         for fname in extracted:
-            pkg_file = os.path.join(self.repo, fname)
+            pkg_file = os.path.join(self.repodir, fname)
             etc_file = os.path.join('/', fname)
             if not os.path.isfile(etc_file):
                 warn('%s does not exist' % etc_file)
@@ -437,28 +455,30 @@ class EtcMerger():
             # overflow. For example on an archlinux box:
             #   find /etc | wc -c   ->    57722
             #   getconf ARG_MAX'    ->  2097152
-            self.git_cmd('add %s' % ' '.join(etc_add))
+            self.repo.git_cmd('add %s' % ' '.join(etc_add))
             commit_msg = """\
             Update the etc-tmp branch with /etc files\n
             Update the etc-tmp branch with the files that are tracked and that
             do not differ from their /etc counterpart, and with the new
             extracted files.
             """
-            self.git_cmd('commit -m "%s"' % dedent(commit_msg))
+            self.repo.git_cmd('commit -m "%s"' % dedent(commit_msg))
 
         sha1 = None
         if cherry_pick:
-            self.git_cmd('add %s' % ' '.join(cherry_pick))
-            self.git_cmd('commit -m "%s"' % 'Update with changed /etc files')
-            sha1 = self.git_cmd('git log --pretty=tformat:%H', do_print=False)
+            self.repo.git_cmd('add %s' % ' '.join(cherry_pick))
+            self.repo.git_cmd('commit -m "%s"' %
+                              'Update with changed /etc files')
+            sha1 = self.repo.git_cmd('git log --pretty=tformat:%H',
+                                     do_print=False)
 
         # Clean the working area.
-        self.git_cmd('clean -d -x -f')
+        self.repo.git_cmd('clean -d -x -f')
 
         # Update the master-tmp branch with new files.
-        self.git_cmd('checkout master-tmp')
+        self.repo.git_cmd('checkout master-tmp')
         for fname in new_master:
-            repo_file = os.path.join(self.repo, fname)
+            repo_file = os.path.join(self.repodir, fname)
             if os.path.isfile(repo_file):
                 warn('adding %s to the master-tmp branch but this file'
                      ' already exists' % fname)
@@ -468,26 +488,26 @@ class EtcMerger():
             etc_file = os.path.join('/', fname)
             shutil.copy(etc_file, dirname)
         if new_master:
-            self.git_cmd('add %s' % ' '.join(new_master))
-            self.git_cmd('commit -m "%s"' % 'Add new files from /etc')
+            self.repo.git_cmd('add %s' % ' '.join(new_master))
+            self.repo.git_cmd('commit -m "%s"' % 'Add new files from /etc')
 
         # Cherry pick the sha1 changes commited in the etc-tmp branch to the
         # master-tmp branch.
         for fname in cherry_pick:
-            repo_file = os.path.join(self.repo, fname)
+            repo_file = os.path.join(self.repodir, fname)
             if not os.path.isfile(repo_file):
                 warn('cherry picking %s to the master-tmp branch but this'
                      ' file does not exist' % fname)
         if sha1 is not None:
-            self.git_cmd('cherry-pick -x %s' % sha1)
+            self.repo.git_cmd('cherry-pick -x %s' % sha1)
 
         if self.dry_run:
             self.remove_tmp_branches()
-            self.git_cmd('checkout master')
+            self.repo.git_cmd('checkout master')
         elif sha1 is None:
             self.finalize()
         else:
-            self.git_cmd('checkout master')
+            self.repo.git_cmd('checkout master')
 
         return cherry_pick
 
