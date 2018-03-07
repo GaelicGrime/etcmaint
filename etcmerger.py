@@ -238,21 +238,34 @@ class EtcMerger():
     def cmd_update(self):
         """Update the repository."""
         self.create_tmp_branches()
-        self.scan_cachedir()
-        print('Command merge ok')
+        cherry_pick = self.scan_cachedir()
+        if cherry_pick:
+            print('List of the files to sync to /etc:')
+            print('\n'.join(cherry_pick))
+        else:
+            print('No files to sync to /etc')
+        print('Update command ok')
 
     def cmd_diff(self):
         """Print the /etc regular file names that are not in the etc branch.
 
         Exclude pacnew, pacsave and pacorig files.
         """
-        self.git_cmd('checkout etc')
+        if self.use_etc_tmp:
+            if 'etc-tmp' in self.branches:
+                self.git_cmd('checkout etc-tmp', do_print=False)
+            else:
+                print('The etc-tmp branch does not exist')
+                return
+        else:
+            self.git_cmd('checkout etc', do_print=False)
+
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
         etc_files = self.list_files('/etc', suffixes=suffixes,
                                     prefixes=self.exclude)
         repo_files = self.list_files(os.path.join(self.repo, 'etc'))
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
-        self.git_cmd('checkout master')
+        self.git_cmd('checkout master', do_print=False)
 
     def cmd_sync(self):
         """Synchronize /etc with the master branch."""
@@ -333,7 +346,7 @@ class EtcMerger():
 
         extracted = {}
         for pkg in packages:
-            print('extracting from package:', pkg.name)
+            print('extracting', pkg.name)
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
                 try:
@@ -452,7 +465,7 @@ class EtcMerger():
             dirname = os.path.dirname(repo_file)
             if dirname and not os.path.isdir(dirname):
                 os.makedirs(dirname)
-            etc_file = os.path.join('/etc', fname)
+            etc_file = os.path.join('/', fname)
             shutil.copy(etc_file, dirname)
         if new_master:
             self.git_cmd('add %s' % ' '.join(new_master))
@@ -475,6 +488,8 @@ class EtcMerger():
             self.finalize()
         else:
             self.git_cmd('checkout master')
+
+        return cherry_pick
 
 def dispatch_help(args):
     """Use 'help <command>' to get help on the command."""
@@ -549,6 +564,9 @@ def parse_args(argv, namespace):
                 metavar='PFXS',
                 help='A comma separated list of prefixes of /etc file'
                 ' names to be ignored (default: "%(default)s")')
+            parser.add_argument('--use-etc-tmp',
+                help='Use the etc-tmp branch instead (default: %(default)s)',
+                action='store_true', default=False)
         parsers[cmd] = parser
 
     main_parser.parse_args(argv[1:], namespace=namespace)
