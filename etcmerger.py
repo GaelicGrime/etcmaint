@@ -1,5 +1,5 @@
 #! /bin/env python
-"""Arch Linux maintenance tool for /etc files."""
+"""Arch Linux maintenance tool for merging /etc files."""
 
 import sys
 import os
@@ -44,7 +44,7 @@ def repo_name():
             print('Error: HOME environment variable not set', file=sys.stderr)
             sys.exit(1)
         xdg_data_home = os.path.join(home, '.local/share')
-    repo = os.path.join(xdg_data_home, 'etc-almerger')
+    repo = os.path.join(xdg_data_home, 'etcmerger')
     return repo
 
 @contextlib.contextmanager
@@ -60,16 +60,16 @@ def change_cwd(path):
 class Timestamp():
     def __init__(self, merger):
         self.merger = merger
-        self.fname = '.almerger_timestamp'
+        self.fname = '.etcmerger_timestamp'
         self.prefix = 'TIMESTAMP='
         self.path = os.path.join(merger.repo, self.fname)
 
     def new(self):
         """Create the timestamp file."""
         content = """\
-            # This file is created by etc_almerger.py. Its purpose is to
-            # record the time the master (resp. etc) branch has been
-            # fast-forwarded to the master-tmp (resp. etc-tmp) branch.
+            # This file is created by etcmerger. Its purpose is to record the
+            # time the master (resp. etc) branch has been fast-forwarded to
+            # the master-tmp (resp. etc-tmp) branch.
             TIMESTAMP=0
         """
         self.merger.add_file(self.fname, content, 'Add the timestamp')
@@ -100,7 +100,7 @@ class Timestamp():
                     return int(line[line.index('=')+1:])
         self.abort_corrupted()
 
-class ArchLinuxMerger():
+class EtcMerger():
     """Provide methods to implement the commands."""
 
     def __init__(self):
@@ -117,7 +117,7 @@ class ArchLinuxMerger():
             self.cachedir = cfg['options']['CacheDir']
 
     def run(self):
-        """Run the merger command."""
+        """Run the etcmerger command."""
         self.init()
         self.func(self)
 
@@ -483,7 +483,7 @@ def dispatch_help(args):
         command = 'help'
     args.parsers[command].print_help()
 
-    cmd_func = getattr(ArchLinuxMerger, 'cmd_%s' % command)
+    cmd_func = getattr(EtcMerger, 'cmd_%s' % command)
     print('\n' + cmd_func.__doc__)
 
 def parse_args(argv, namespace):
@@ -499,8 +499,8 @@ def parse_args(argv, namespace):
                              version='%(prog)s ' + __version__)
 
     # The help subparser handles the help for each command.
-    subparsers = main_parser.add_subparsers(title='These are the etc-almerger'
-                                            ' commands')
+    subparsers = main_parser.add_subparsers(title='These are the etcmerger'
+                                                  ' commands')
     parsers = { 'help': main_parser }
     parser = subparsers.add_parser('help', add_help=False,
                                    help=dispatch_help.__doc__.splitlines()[0])
@@ -509,7 +509,7 @@ def parse_args(argv, namespace):
     parser.set_defaults(func=dispatch_help, parsers=parsers)
 
     # Add the command subparsers.
-    d = dict(inspect.getmembers(ArchLinuxMerger, inspect.isfunction))
+    d = dict(inspect.getmembers(EtcMerger, inspect.isfunction))
     for command in sorted(d):
         if not command.startswith('cmd_'):
             continue
@@ -556,8 +556,8 @@ def parse_args(argv, namespace):
         main_parser.error('a command is required')
 
 def main():
-    # Assign the parsed args to the merger instance.
-    merger = ArchLinuxMerger()
+    # Assign the parsed args to the EtcMerger instance.
+    merger = EtcMerger()
     parse_args(sys.argv, merger)
 
     # Run the command.
