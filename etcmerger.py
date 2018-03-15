@@ -116,8 +116,9 @@ Sha1File = namedtuple('Sha1File', ['abspath', 'sha1'])
 class GitRepo():
     """A git repository."""
 
-    def __init__(self, repodir, dry_run):
+    def __init__(self, repodir, verbose, dry_run):
         self.repodir = repodir
+        self.verbose = verbose
         self.dry_run = dry_run
 
     def init(self):
@@ -136,7 +137,7 @@ class GitRepo():
         cmd = 'git --git-dir=%s --work-tree=%s %s' % (git_dir, self.repodir,
                                                       cmd)
         output = run_cmd(cmd, self.dry_run)
-        if do_print:
+        if do_print and self.verbose:
             output = output.strip('\n')
             if output:
                 print(output)
@@ -216,19 +217,47 @@ class Timestamp():
 
 class UpdateResults():
     def __init__(self):
-        self.etc_remove = []
-        self.new_master_user = []
-
-        self.etc_add = []
-        self.new_master = []
+        self.etc_removed = []
+        self.user_updates = []
+        self.pkg_add_etc = []
+        self.pkg_add_master = []
         self.cherry_pick = []
+        self.btype = ''
 
     def __str__(self):
+        def add_list(files, msg):
+            return (separator + dedent(msg) + '\n'.join(files) + '\n' if files
+                    else '')
+
         txt = ''
-        if self.cherry_pick:
-            txt += 'List of the files to sync to /etc:'
-            txt += '\n'.join(self.cherry_pick)
-        else:
+        btype = self.btype
+        separator = '-' * 40 + '\n'
+        msg = """\
+        List of the files removed from both branches (missing in /etc):
+        """
+        txt += add_list(self.etc_removed, msg)
+
+        msg = f"""\
+        List of the files in the 'master{btype}' branch that have been updated
+        on /etc and of the new files added to the 'master{btype}' branch
+        because their counterpart in the 'etc{btype}' branch differs now from
+        the corresponding /etc file:
+        """
+        txt += add_list(self.user_updates, msg)
+
+        msg = f"""\
+        List of the files extracted from a package and added to the 'etc{btype}' branch:
+        """
+        txt += add_list(self.pkg_add_etc, msg)
+
+        msg = f"""\
+        List of the files extracted from a package and added to the 'master{btype}' branch:
+        """
+        txt += add_list(self.pkg_add_master, msg)
+
+        txt += add_list(self.cherry_pick,
+                        'List of the files to sync to /etc:\n')
+        if not self.cherry_pick:
             txt += 'No files to sync to /etc'
         return txt
 
@@ -241,14 +270,17 @@ class EtcMerger():
         self.results = UpdateResults()
 
     def init(self):
+        if not hasattr(self, 'verbose'):
+            self.verbose = False
         if not hasattr(self, 'dry_run'):
             self.dry_run = False
+        self.repo = GitRepo(self.repodir, self.verbose, self.dry_run)
+
         if hasattr(self, 'cachedir') and self.cachedir is None:
             cfg = configparser.ConfigParser(allow_no_value=True)
             with open('/etc/pacman.conf') as f:
                 cfg.read_file(f)
             self.cachedir = cfg['options']['CacheDir']
-        self.repo = GitRepo(self.repodir, self.dry_run)
 
     def run(self):
         """Run the etcmerger command."""
@@ -271,11 +303,10 @@ class EtcMerger():
         # Create the timestamp file in the etc branch.
         self.timestamp.new()
 
-        self.cmd_update()
+        self._cmd_update()
         print('Init command terminated')
 
-    def cmd_update(self):
-        """Update the repository."""
+    def _cmd_update(self):
         self.repo.assert_exists()
         self.create_tmp_branches()
 
@@ -288,9 +319,18 @@ class EtcMerger():
         elif not self.results.cherry_pick:
             self.finalize()
 
-        print(self.results)
         self.repo.git_cmd('checkout master')
-        print('The repository has been updated')
+
+    def cmd_update(self):
+        """Update the repository."""
+        self._cmd_update()
+
+        if 'master-tmp' in self.repo.branches:
+            self.results.btype = '-tmp'
+        print(self.results)
+
+        self.repo.git_cmd('checkout master')
+        print('Update command terminated')
 
     def cmd_diff(self):
         """Print the /etc regular file names that are not in the etc branch.
@@ -358,12 +398,12 @@ class EtcMerger():
         for fname in etc_tracked:
             etc_file = os.path.join('/', fname)
             if not os.path.isfile(etc_file):
-                res.etc_remove.append(fname)
+                res.etc_removed.append(fname)
 
         # Remove the etc-tmp files that do not exist in /etc.
         # The last tracked_files() has set the current branch to etc-tmp.
-        if res.etc_remove:
-            self.repo.git_cmd('rm %s' % ' '.join(res.etc_remove))
+        if res.etc_removed:
+            self.repo.git_cmd('rm %s' % ' '.join(res.etc_removed))
             self.repo.git_cmd('commit -m "Update etc-tmp with removed'
                                           ' /etc files"')
 
@@ -371,7 +411,7 @@ class EtcMerger():
         # branch.
         master_remove = []
         master_tracked = self.repo.tracked_files('master-tmp')
-        for fname in res.etc_remove:
+        for fname in res.etc_removed:
             if fname in master_tracked:
                 master_remove.append(fname)
         if master_remove:
@@ -417,15 +457,15 @@ class EtcMerger():
         res = self.results
         for fname in to_check_in_master:
             if fname not in master_tracked:
-                res.new_master_user.append(fname)
+                res.user_updates.append(fname)
         for fname in etc_files:
             name = etc_files[fname].abspath[1:]
             if name in master_tracked:
                 if etc_files[fname].sha1 != master_tracked[name].sha1:
-                    res.new_master_user.append(name)
+                    res.user_updates.append(name)
 
-        if res.new_master_user:
-            self.repo.git_cmd('add %s' % ' '.join(res.new_master_user))
+        if res.user_updates:
+            self.repo.git_cmd('add %s' % ' '.join(res.user_updates))
             self.repo.git_cmd('commit -m "%s"' % 'Update with user changes')
 
     def git_upgraded_pkgs(self):
@@ -433,12 +473,12 @@ class EtcMerger():
 
         self.scan_cachedir()
         res = self.results
-        if res.etc_add:
+        if res.pkg_add_etc:
             # The following statement does not incur a command line length
             # overflow. For example on an archlinux box:
             #   find /etc | wc -c   ->    57722
             #   getconf ARG_MAX'    ->  2097152
-            self.repo.git_cmd('add %s' % ' '.join(res.etc_add))
+            self.repo.git_cmd('add %s' % ' '.join(res.pkg_add_etc))
             commit_msg = """\
             Update the etc-tmp branch with /etc files\n
             Update the etc-tmp branch with the files that are tracked and that
@@ -459,7 +499,7 @@ class EtcMerger():
 
         # Update the master-tmp branch with new files.
         self.repo.git_cmd('checkout master-tmp')
-        for fname in res.new_master:
+        for fname in res.pkg_add_master:
             repo_file = os.path.join(self.repodir, fname)
             if os.path.isfile(repo_file):
                 warn('adding %s to the master-tmp branch but this file'
@@ -469,8 +509,8 @@ class EtcMerger():
                 os.makedirs(dirname)
             etc_file = os.path.join('/', fname)
             shutil.copy(etc_file, dirname)
-        if res.new_master:
-            self.repo.git_cmd('add %s' % ' '.join(res.new_master))
+        if res.pkg_add_master:
+            self.repo.git_cmd('add %s' % ' '.join(res.pkg_add_master))
             self.repo.git_cmd('commit -m "%s"' % 'Add new files from /etc')
 
         # Cherry pick the sha1 changes commited in the etc-tmp branch to the
@@ -589,9 +629,6 @@ class EtcMerger():
         for fname in extracted:
             pkg_file = os.path.join(self.repodir, fname)
             etc_file = os.path.join('/', fname)
-            if not os.path.isfile(etc_file):
-                warn('%s does not exist' % etc_file)
-                continue
             sha1_pkg_file = path_sha1(pkg_file)
             try:
                 sha1_etc_file = path_sha1(etc_file)
@@ -601,14 +638,14 @@ class EtcMerger():
 
             # A new package install.
             if fname not in etc_tracked:
-                res.etc_add.append(fname)
+                res.pkg_add_etc.append(fname)
                 if sha1_etc_file != sha1_pkg_file:
-                    res.new_master.append(fname)
+                    res.pkg_add_master.append(fname)
             # A package upgrade.
             else:
                 if sha1_etc_file == sha1_pkg_file:
                     if extracted[tarinfo] != sha1_pkg_file:
-                        res.etc_add.append(fname)
+                        res.pkg_add_etc.append(fname)
                         if fname in master_tracked:
                             warn('%s exists in the master branch' % fname)
                 else:
@@ -665,6 +702,9 @@ def parse_args(argv, namespace):
                 ' with no changes made (default: %(default)s)',
                 action='store_true', default=False)
         if cmd in ('init', 'update'):
+            parser.add_argument('--verbose', '-v', help='Print the output of'
+                ' the git commands (default: %(default)s)',
+                action='store_true', default=False)
             parser.add_argument('--cachedir', help='Set pacman cache'
                 ' directory (override the /etc/pacman.conf setting)',
                 type=isdir)
