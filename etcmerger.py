@@ -16,6 +16,7 @@ import contextlib
 from textwrap import dedent
 from collections import namedtuple
 from subprocess import check_output, STDOUT, CalledProcessError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 __version__ = '0.1'
 pgm = os.path.basename(sys.argv[0])
@@ -391,8 +392,8 @@ class EtcMerger():
             return Sha1File(etc_file, sha1)
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = dict((n, etc_sha1file(n)) for
-                         n in list_files('/etc', suffixes=suffixes))
+        etc_files = {n: etc_sha1file(n) for
+                         n in list_files('/etc', suffixes=suffixes)}
         etc_tracked = self.repo.tracked_files('etc-tmp', with_sha1=True)
 
         # Build the list of etc-tmp files that are different from their
@@ -521,11 +522,10 @@ class EtcMerger():
                         fname not in self.exclude_files):
                     yield tarinfo
 
-        extracted = {}
-        for pkg in packages:
-            print('extracting', pkg.name)
+        def extract_pkg(pkg):
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
+                # Remember the sha1 of the existing file, if it exists.
                 try:
                     sha1_of_previous = path_sha1(os.path.join(self.repodir,
                                                               tarinfo.name))
@@ -534,14 +534,25 @@ class EtcMerger():
                 extracted[tarinfo.name] = sha1_of_previous
             tar.extractall(self.repodir,
                            members=etc_files_filter(tar.getmembers()))
-            for fname in extracted:
-                if fname not in tracked:
-                    # Ensure that the file can be overwritten on a next
-                    # 'update' command.
-                    path = os.path.join(self.repodir, fname)
-                    mode = os.stat(path).st_mode
-                    if mode & RW_ACCESS != RW_ACCESS:
-                        os.chmod(path, mode | RW_ACCESS)
+
+        extracted = {}
+        # Setting max_workers to 5 seems to be faster than the default, i.e.
+        # the number of processors on the machine, multiplied by 5.
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(extract_pkg, pkg):
+                            pkg for pkg in packages}
+            for future in as_completed(futures):
+                pkg = futures[future]
+                print('extracting', pkg.name)
+
+        for fname in extracted:
+            if fname not in tracked:
+                # Ensure that the file can be overwritten on a next
+                # 'update' command.
+                path = os.path.join(self.repodir, fname)
+                mode = os.stat(path).st_mode
+                if mode & RW_ACCESS != RW_ACCESS:
+                    os.chmod(path, mode | RW_ACCESS)
         return extracted
 
     def scan_cachedir(self):
