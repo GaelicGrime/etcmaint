@@ -129,16 +129,20 @@ class GitRepo():
             os.makedirs(self.repodir)
         self.git_cmd('init')
 
-    def assert_exists(self):
-        self.git_cmd('status', do_print=False)
+    def assert_isclean(self):
+        status = self.git_cmd('status --porcelain --untracked-files=no',
+                              do_print=False)
+        if status:
+            abort('the %s repository is not clean:\n%s' %
+                  (self.repodir, status))
 
     def git_cmd(self, cmd, do_print=True):
         git_dir = os.path.join(self.repodir, '.git')
         cmd = 'git --git-dir=%s --work-tree=%s %s' % (git_dir, self.repodir,
                                                       cmd)
         output = run_cmd(cmd, self.dry_run)
+        output = output.strip('\n')
         if do_print and self.verbose:
-            output = output.strip('\n')
             if output:
                 print(output)
         return output
@@ -157,7 +161,7 @@ class GitRepo():
                                branch, do_print=False)
 
         self.git_cmd('checkout %s' % branch, do_print=False)
-        for fname in ls_tree.strip('\n').split('\n'):
+        for fname in ls_tree.split('\n'):
             if exclude and fname in exclude:
                 continue
             if with_sha1:
@@ -307,7 +311,7 @@ class EtcMerger():
         print('Init command terminated')
 
     def _cmd_update(self):
-        self.repo.assert_exists()
+        self.repo.assert_isclean()
         self.create_tmp_branches()
 
         self.git_upgraded_pkgs()
@@ -338,7 +342,7 @@ class EtcMerger():
         Exclude pacnew, pacsave and pacorig files.
         """
 
-        self.repo.assert_exists()
+        self.repo.assert_isclean()
         if self.use_etc_tmp:
             if 'etc-tmp' in self.repo.branches:
                 self.repo.git_cmd('checkout etc-tmp', do_print=False)
@@ -357,7 +361,7 @@ class EtcMerger():
 
     def cmd_sync(self):
         """Synchronize /etc with the master branch."""
-        self.repo.assert_exists()
+        self.repo.assert_isclean()
         self.finalize()
         self.repo.git_cmd('checkout master')
         print('Sync command terminated')
@@ -576,9 +580,8 @@ class EtcMerger():
                            members=etc_files_filter(tar.getmembers()))
 
         extracted = {}
-        # Setting max_workers to 5 seems to be faster than the default, i.e.
-        # the number of processors on the machine, multiplied by 5.
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        max_workers = len(os.sched_getaffinity(0)) or 4
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(extract_pkg, pkg):
                             pkg for pkg in packages}
             for future in as_completed(futures):
