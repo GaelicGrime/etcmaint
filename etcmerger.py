@@ -80,6 +80,20 @@ def repository_dir():
         xdg_data_home = os.path.join(home, '.local/share')
     return os.path.join(xdg_data_home, 'etcmerger')
 
+def copy_from_etc(rpath, repodir, repo_file=None):
+    """Copy a file on /etc to the repository.
+
+    'rpath' is the relative path to the repository directory.
+    """
+
+    if repo_file is None:
+        repo_file = os.path.join(repodir, rpath)
+    dirname = os.path.dirname(repo_file)
+    if dirname and not os.path.isdir(dirname):
+        os.makedirs(dirname)
+    etc_file = os.path.join('/', rpath)
+    shutil.copy(etc_file, dirname)
+
 def run_cmd(cmd, dry_run=False):
     if dry_run:
         print(cmd)
@@ -130,8 +144,7 @@ class GitRepo():
         self.git_cmd('init')
 
     def assert_isclean(self):
-        status = self.git_cmd('status --porcelain --untracked-files=no',
-                              do_print=False)
+        status = self.git_cmd('status --porcelain', do_print=False)
         if status:
             abort('the %s repository is not clean:\n%s' %
                   (self.repodir, status))
@@ -173,7 +186,7 @@ class GitRepo():
 
     @property
     def branches(self):
-        branches = self.git_cmd('branch --list', do_print=False)
+        branches = self.git_cmd('branch --list --no-color', do_print=False)
         return [x.strip(' *') for x in branches.split('\n')]
 
 class Timestamp():
@@ -368,10 +381,12 @@ class EtcMerger():
 
     def create_tmp_branches(self):
         print('Create the master-tmp and etc-tmp branches')
+        self.repo.git_cmd('checkout master')
         for branch in ('etc', 'master'):
             tmp_branch = '%s-tmp' % branch
             if tmp_branch in self.repo.branches:
                 self.repo.git_cmd('branch --delete --force %s' % tmp_branch)
+                print("Remove the previous unused '%s' branch" % tmp_branch)
             self.repo.git_cmd('checkout %s' % branch, do_print=False)
             self.repo.git_cmd('branch %s' % tmp_branch)
 
@@ -468,6 +483,8 @@ class EtcMerger():
                 if etc_files[fname].sha1 != master_tracked[name].sha1:
                     res.user_updates.append(name)
 
+        for name in res.user_updates:
+            copy_from_etc(name, self.repodir)
         if res.user_updates:
             self.repo.git_cmd('add %s' % ' '.join(res.user_updates))
             self.repo.git_cmd('commit -m "%s"' % 'Update with user changes')
@@ -502,18 +519,14 @@ class EtcMerger():
         self.repo.git_cmd('clean -d -x -f')
 
         # Update the master-tmp branch with new files.
-        self.repo.git_cmd('checkout master-tmp')
-        for fname in res.pkg_add_master:
-            repo_file = os.path.join(self.repodir, fname)
-            if os.path.isfile(repo_file):
-                warn('adding %s to the master-tmp branch but this file'
-                     ' already exists' % fname)
-            dirname = os.path.dirname(repo_file)
-            if dirname and not os.path.isdir(dirname):
-                os.makedirs(dirname)
-            etc_file = os.path.join('/', fname)
-            shutil.copy(etc_file, dirname)
         if res.pkg_add_master:
+            self.repo.git_cmd('checkout master-tmp')
+            for fname in res.pkg_add_master:
+                repo_file = os.path.join(self.repodir, fname)
+                if os.path.isfile(repo_file):
+                    warn('adding %s to the master-tmp branch but this file'
+                         ' already exists' % fname)
+                copy_from_etc(fname, self.repodir, repo_file=repo_file)
             self.repo.git_cmd('add %s' % ' '.join(res.pkg_add_master))
             self.repo.git_cmd('commit -m "%s"' % 'Add new files from /etc')
 
@@ -586,7 +599,7 @@ class EtcMerger():
                             pkg for pkg in packages}
             for future in as_completed(futures):
                 pkg = futures[future]
-                print('extracting', pkg.name)
+                print('extracted', pkg.name)
 
         for fname in extracted:
             if fname not in tracked:
@@ -647,12 +660,12 @@ class EtcMerger():
             # A package upgrade.
             else:
                 if sha1_etc_file == sha1_pkg_file:
-                    if extracted[tarinfo] != sha1_pkg_file:
+                    if extracted[fname] != sha1_pkg_file:
                         res.pkg_add_etc.append(fname)
                         if fname in master_tracked:
                             warn('%s exists in the master branch' % fname)
                 else:
-                    if extracted[tarinfo] != sha1_pkg_file:
+                    if extracted[fname] != sha1_pkg_file:
                         res.cherry_pick.append(fname)
                         if fname not in master_tracked:
                             warn('%s does not exist in the master branch' %
@@ -719,7 +732,7 @@ def parse_args(argv, namespace):
             parser.add_argument('--followlinks',
                 help='Visit directories pointed to by symlinks in cachedir.'
                 ' Be aware that using this option can lead to infinite'
-                ' recursion if a link points to a parent director of itself'
+                ' recursion if a link points to a parent directory of itself'
                 ' (default: "%(default)s")',
                 action='store_true', default=False)
         if cmd in ('init', 'update', 'sync'):
