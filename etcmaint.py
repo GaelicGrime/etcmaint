@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 __version__ = '0.1'
 pgm = os.path.basename(sys.argv[0])
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
-FIRST_COMMIT_MSG = 'First etcmerger commit'
+FIRST_COMMIT_MSG = 'First etcmaint commit'
 EXCLUDE_FILES = 'passwd, group, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
 EXCLUDE_ETC = 'ca-certificates, fonts, ssl/certs'
@@ -79,7 +79,7 @@ def repository_dir():
             print('Error: HOME environment variable not set', file=sys.stderr)
             sys.exit(1)
         xdg_data_home = os.path.join(home, '.local/share')
-    return os.path.join(xdg_data_home, 'etcmerger')
+    return os.path.join(xdg_data_home, 'etcmaint')
 
 def copy_from_etc(rpath, repodir, repo_file=None):
     """Copy a file on /etc to the repository.
@@ -145,7 +145,7 @@ class GitRepo():
         first_commit_msg = commit.split('\n')[1]
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
-                this is not an etcmerger repository
+                this is not an etcmaint repository
                 found as the first commit message:
                 '{first_commit_msg}'
                 instead of the expected '{FIRST_COMMIT_MSG}' message"""
@@ -223,14 +223,14 @@ class GitRepo():
 class Timestamp():
     def __init__(self, merger):
         self.merger = merger
-        self.fname = '.etcmerger_timestamp'
+        self.fname = '.etcmaint_timestamp'
         self.prefix = 'TIMESTAMP='
         self.path = os.path.join(merger.repodir, self.fname)
 
     def new(self):
         """Create the timestamp file."""
         content = """\
-            # This file is created by etcmerger. Its purpose is to record the
+            # This file is created by etcmaint. Its purpose is to record the
             # time the master (resp. etc) branch has been fast-forwarded to
             # the master-tmp (resp. etc-tmp) branch.
             TIMESTAMP=0
@@ -331,7 +331,7 @@ class EtcMerger():
             self.cachedir = cfg['options']['CacheDir']
 
     def run(self):
-        """Run the etcmerger command."""
+        """Run the etcmaint command."""
         self.init()
         self.func(self)
 
@@ -591,7 +591,7 @@ class EtcMerger():
                         packages[name] = pkg
         return packages.values()
 
-    def extract(self, packages, tracked):
+    def scan(self, packages, tracked):
         def etc_files_filter(members):
             for tarinfo in members:
                 fname = tarinfo.name
@@ -599,7 +599,7 @@ class EtcMerger():
                         fname not in self.exclude_files):
                     yield tarinfo
 
-        def extract_pkg(pkg):
+        def extract_from(pkg):
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
                 # Remember the sha1 of the existing file, if it exists.
@@ -615,11 +615,11 @@ class EtcMerger():
         extracted = {}
         max_workers = len(os.sched_getaffinity(0)) or 4
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(extract_pkg, pkg):
+            futures = {executor.submit(extract_from, pkg):
                             pkg for pkg in packages}
             for future in as_completed(futures):
                 pkg = futures[future]
-                print('extracted', pkg.name)
+                print('scanned', pkg.name)
 
         for fname in extracted:
             if fname not in tracked:
@@ -658,7 +658,7 @@ class EtcMerger():
         master_tracked = self.repo.tracked_files('master-tmp')
         etc_tracked = self.repo.tracked_files('etc-tmp')
         self.repo.checkout('etc-tmp')
-        extracted = self.extract(self.new_packages(), etc_tracked)
+        extracted = self.scan(self.new_packages(), etc_tracked)
 
         res = self.results
         for fname in extracted:
@@ -713,7 +713,7 @@ def parse_args(argv, namespace):
                              version='%(prog)s ' + __version__)
 
     # The help subparser handles the help for each command.
-    subparsers = main_parser.add_subparsers(title='These are the etcmerger'
+    subparsers = main_parser.add_subparsers(title='These are the etcmaint'
                                                   ' commands')
     parsers = { 'help': main_parser }
     parser = subparsers.add_parser('help', add_help=False,
