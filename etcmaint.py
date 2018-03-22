@@ -1,5 +1,17 @@
 #! /bin/env python
-"""A tool for the maintenance of /etc files"""
+"""An Arch Linux tool for the maintenance of /etc files.
+
+The /etc files installed or upgraded by Arch Linux packages are managed in
+the 'etc' branch of a git repository. The /etc files customized or created by
+a user are managed in the 'master' branch. The git repository is located at
+$XDG_DATA_HOME/etcmaint if the XDG_DATA_HOME environment variable is set and
+at $HOME/.local/share/etcmaint otherwise.
+
+The upgraded packages changes of user-customized files are merged (actually
+cherry-picked) by etcmaint. Merge conflicts must be resolved by the user.
+After the merge, the 'sync' subcommand is used to retrofit those changes to
+the files on /etc.
+"""
 
 import sys
 import os
@@ -134,7 +146,7 @@ class GitRepo():
     def init(self):
         # Check the first commit message.
         commit = self.git_cmd('rev-list --max-parents=0 --format=%s master --')
-        first_commit_msg = commit.split('\n')[1]
+        first_commit_msg = commit.splitlines()[1]
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
                 this is not an etcmaint repository
@@ -170,7 +182,7 @@ class GitRepo():
 
     def get_status(self):
         output = self.git_cmd('status --porcelain')
-        return output.split('\n') if output else output
+        return output.splitlines()
 
     def checkout(self, branch, create=False):
         if create:
@@ -212,7 +224,7 @@ class GitRepo():
                                branch)
         if with_sha1:
             self.checkout(branch)
-        for fname in ls_tree.split('\n'):
+        for fname in ls_tree.splitlines():
             if exclude and fname in exclude:
                 continue
             if with_sha1:
@@ -225,7 +237,7 @@ class GitRepo():
     @property
     def branches(self):
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
-        return branches.split('\n')
+        return branches.splitlines()
 
 class Timestamp():
     def __init__(self, merger):
@@ -333,7 +345,7 @@ class EtcMerger():
         self.func(self)
 
     def cmd_create(self):
-        """create the git repository"""
+        """Create the git repository."""
         self.repo.create()
 
         # Add .gitignore.
@@ -351,7 +363,17 @@ class EtcMerger():
         print('Git repository created at %s' % self.repodir)
 
     def cmd_update(self):
-        """update the repository with packages and user changes"""
+        """Update the repository with packages and user changes.
+
+        The changes are done in temporary branches named 'master-tmp' and
+        'etc-tmp'. When the changes do not incur a merge, the 'master' (resp.
+        'etc') branch is fast-forwarded to its temporary branch and the
+        temporary branch deleted. Otherwise this fast-forwarding is postponed
+        until the merge is synced to /etc with the 'sync' subcommand. Until
+        then it is still possible to start over with a new 'update'
+        subcommand, the previous temporary branches being discarded in that
+        case.
+        """
         if self.update_repository():
             if self.results:
                 print(self.results)
@@ -359,9 +381,15 @@ class EtcMerger():
             print("'update' command terminated: no file to sync to /etc")
 
     def cmd_diff(self):
-        """print /etc file names not in the 'etc' branch
+        """Print the list of /etc file names not in the 'etc' branch.
 
-        Exclude pacnew, pacsave and pacorig files.
+        These are the /etc files not created from an Arch Linux package. Among
+        them and of interest are the files created by a user that one may want
+        to manually add and commit to the 'master' branch of the etcmaint
+        repository so that their changes start being tracked by etcmaint (for
+        example the netctl configuration files).
+
+        pacnew, pacsave and pacorig files are excluded from this list.
         """
 
         self.repo.init()
@@ -382,7 +410,10 @@ class EtcMerger():
         self.repo.checkout('master')
 
     def cmd_sync(self):
-        """synchronize /etc with the 'master' branch"""
+        """Synchronize /etc with the files in the 'master' branch.
+
+        Use rsync to retrofit the last changes after a merge.
+        """
         self.repo.init()
         self.finalize()
         self.repo.checkout('master')
@@ -488,7 +519,7 @@ class EtcMerger():
                                                             self.repodir))
             print('This is the result of the cherry-pick command:')
             print('\n'.join('  %s' % l for l in
-                            proc.stdout.strip('\n').split('\n')))
+                            proc.stdout.splitlines()))
             msg = """\
             You may use 'git -C %s cherry-pick --abort'
             and start over later with another 'etcmaint update' command"""
@@ -737,7 +768,7 @@ class EtcMerger():
                                  fname)
 
 def dispatch_help(args):
-    """get help on a command"""
+    """Get help on a command."""
     command = args.subcommand
     if command is None:
         command = 'help'
@@ -745,7 +776,9 @@ def dispatch_help(args):
 
     cmd_func = getattr(EtcMerger, 'cmd_%s' % command, None)
     if cmd_func:
-        print('\n' + cmd_func.__doc__)
+        lines = cmd_func.__doc__.splitlines()
+        print('\n' + lines[0])
+        print(dedent('\n'.join(lines[1:])), end='')
 
 def parse_args(argv, namespace):
     def isdir(path):
@@ -755,12 +788,13 @@ def parse_args(argv, namespace):
 
     # Instantiate the main parser.
     main_parser = argparse.ArgumentParser(prog=pgm,
-                                          description=__doc__, add_help=False)
+                    formatter_class=argparse.RawDescriptionHelpFormatter,
+                    description=__doc__, add_help=False)
     main_parser.add_argument('--version', '-v', action='version',
-                             version='%(prog)s ' + __version__)
+                    version='%(prog)s ' + __version__)
 
     # The help subparser handles the help for each command.
-    subparsers = main_parser.add_subparsers(title='etcmaint commands')
+    subparsers = main_parser.add_subparsers(title='etcmaint subcommands')
     parsers = { 'help': main_parser }
     parser = subparsers.add_parser('help', add_help=False,
                                    help=dispatch_help.__doc__.splitlines()[0])
