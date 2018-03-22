@@ -1,5 +1,5 @@
 #! /bin/env python
-"""A tool for the maintenance of /etc files."""
+"""A tool for the maintenance of /etc files"""
 
 import sys
 import os
@@ -133,8 +133,7 @@ class GitRepo():
 
     def init(self):
         # Check the first commit message.
-        commit = self.git_cmd('rev-list --max-parents=0 --format=%s master --',
-                              do_print=False)
+        commit = self.git_cmd('rev-list --max-parents=0 --format=%s master --')
         first_commit_msg = commit.split('\n')[1]
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
@@ -155,7 +154,7 @@ class GitRepo():
 
         self.checkout('master')
 
-    def git_cmd(self, cmd, do_print=True):
+    def git_cmd(self, cmd):
         if type(cmd) == str:
             cmd = cmd.split()
         try:
@@ -165,13 +164,12 @@ class GitRepo():
             output = str(e) + '\n' + e.output.strip('\n')
             abort(output)
         output = output.strip('\n')
-        if do_print and self.verbose:
-            if output:
+        if self.verbose and output:
                 print(output)
         return output
 
     def get_status(self):
-        output = self.git_cmd('status --porcelain', do_print=False)
+        output = self.git_cmd('status --porcelain')
         return output.split('\n') if output else output
 
     def checkout(self, branch, create=False):
@@ -180,7 +178,7 @@ class GitRepo():
         else:
             if branch == self.curbranch:
                 return
-            self.git_cmd('checkout %s' % branch, do_print=False)
+            self.git_cmd('checkout %s' % branch)
         self.curbranch = branch
 
     def commit(self, files, msg):
@@ -211,7 +209,7 @@ class GitRepo():
         """A dictionary of the tracked files in this branch."""
         d = {}
         ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
-                               branch, do_print=False)
+                               branch)
         if with_sha1:
             self.checkout(branch)
         for fname in ls_tree.split('\n'):
@@ -226,8 +224,7 @@ class GitRepo():
 
     @property
     def branches(self):
-        branches = self.git_cmd("for-each-ref --format=%(refname:short)",
-                                do_print=False)
+        branches = self.git_cmd("for-each-ref --format=%(refname:short)")
         return branches.split('\n')
 
 class Timestamp():
@@ -276,7 +273,8 @@ class Timestamp():
 class UpdateResults():
     def __init__(self):
         self.etc_removed = []
-        self.user_updates = []
+        self.user_added = []
+        self.user_updated = []
         self.pkg_add_etc = []
         self.pkg_add_master = []
         self.cherry_pick = []
@@ -293,8 +291,10 @@ class UpdateResults():
     def __str__(self):
         btype = self.btype
         self.add_list(self.etc_removed,
-         "List of files removed from both branches (missing in /etc):")
-        self.add_list(self.user_updates,
+         "List of files missing in /etc and removed from both branches:")
+        self.add_list(self.user_added,
+         f"List of files added to the 'master{btype}' branch:")
+        self.add_list(self.user_updated,
          f"List of files updated in the 'master{btype}' branch:")
         self.add_list(self.pkg_add_etc,
          f"List of files extracted from a package and added to the"
@@ -332,8 +332,8 @@ class EtcMerger():
         self.init()
         self.func(self)
 
-    def cmd_init(self):
-        """Initialize the git repository."""
+    def cmd_create(self):
+        """create the git repository"""
         self.repo.create()
 
         # Add .gitignore.
@@ -346,38 +346,20 @@ class EtcMerger():
         self.repo.checkout('etc', create=True)
         self.timestamp.new()
 
-        self._cmd_update(do_print=False)
-        print("'init' command terminated")
-
-    def _cmd_update(self, do_print=True):
-        self.repo.init()
-        self.create_tmp_branches()
-
-        cherry_pick_commit = self.git_upgraded_pkgs()
-        self.git_removed_pkgs()
-        self.git_user_updates()
-
-        if cherry_pick_commit:
-            self.git_cherry_pick(cherry_pick_commit)
-            return False
-        else:
-            if self.dry_run:
-                self.remove_tmp_branches()
-            else:
-                self.finalize()
-
-        if do_print and self.results:
-            print(self.results)
+        self.update_repository()
         self.repo.checkout('master')
-        return True
+        print('Git repository created at %s' % self.repodir)
 
     def cmd_update(self):
-        """Update the repository."""
-        if self._cmd_update():
+        """update the repository with packages and user changes"""
+        if self.update_repository():
+            if self.results:
+                print(self.results)
+            self.repo.checkout('master')
             print("'update' command terminated: no file to sync to /etc")
 
     def cmd_diff(self):
-        """Print the /etc regular file names that are not in the etc branch.
+        """print /etc file names not in the 'etc' branch
 
         Exclude pacnew, pacsave and pacorig files.
         """
@@ -400,7 +382,7 @@ class EtcMerger():
         self.repo.checkout('master')
 
     def cmd_sync(self):
-        """Synchronize /etc with the master branch."""
+        """synchronize /etc with the 'master' branch"""
         self.repo.init()
         self.finalize()
         self.repo.checkout('master')
@@ -436,6 +418,24 @@ class EtcMerger():
             print('Updating the timestamp')
             self.repo.checkout('etc')
             self.timestamp.now()
+
+    def update_repository(self):
+        self.repo.init()
+        self.create_tmp_branches()
+
+        cherry_pick_commit = self.git_upgraded_pkgs()
+        self.git_removed_pkgs()
+        self.git_user_updates()
+
+        if cherry_pick_commit:
+            self.git_cherry_pick(cherry_pick_commit)
+            return False
+        else:
+            if self.dry_run:
+                self.remove_tmp_branches()
+            else:
+                self.finalize()
+        return True
 
     def git_cherry_pick(self, commit):
         self.repo.checkout('master-tmp')
@@ -506,10 +506,10 @@ class EtcMerger():
                 res.etc_removed.append(fname)
 
         # Remove the etc-tmp files that do not exist in /etc.
+        commit_msg = 'Remove files missing in /etc'
         if res.etc_removed:
             self.repo.checkout('etc-tmp')
-            self.repo.remove(res.etc_removed,
-                             'Update etc-tmp with removed /etc files')
+            self.repo.remove(res.etc_removed, commit_msg)
 
         # Remove the master-tmp files that have been removed in the etc-tmp
         # branch.
@@ -520,8 +520,7 @@ class EtcMerger():
                 master_remove.append(fname)
         if master_remove:
             self.repo.checkout('master-tmp')
-            self.repo.remove(master_remove,
-                             'Update master-tmp with removed /etc files')
+            self.repo.remove(master_remove, commit_msg)
 
     def git_user_updates(self):
         """Update master-tmp with the user changes."""
@@ -558,18 +557,22 @@ class EtcMerger():
         res = self.results
         for fname in to_check_in_master:
             if fname not in master_tracked:
-                res.user_updates.append(fname)
+                res.user_added.append(fname)
         for fname in etc_files:
             name = etc_files[fname].abspath[1:]
             if name in master_tracked:
                 if etc_files[fname].sha1 != master_tracked[name].sha1:
-                    res.user_updates.append(name)
+                    res.user_updated.append(name)
 
-        if res.user_updates:
+        if res.user_added or res.user_updated:
             self.repo.checkout('master-tmp')
-            for name in res.user_updates:
+        for files, commit_msg in (
+                (res.user_added, 'Add files with user changes'),
+                (res.user_updated, 'Update files with user changes')):
+            for name in files:
                 copy_from_etc(name, self.repodir)
-            self.repo.commit(res.user_updates, 'Update with user changes')
+            if files:
+                self.repo.commit(files, commit_msg)
 
     def git_upgraded_pkgs(self):
         """Update the repository with installed or upgraded packages."""
@@ -577,19 +580,14 @@ class EtcMerger():
         self.scan_cachedir()
         res = self.results
         if res.pkg_add_etc:
-            commit_msg = """\
-            Update the etc-tmp branch with /etc files\n
-            Update the etc-tmp branch with the files that are tracked and that
-            do not differ from their /etc counterpart, and with the new
-            extracted files.
-            """
-            self.repo.commit(res.pkg_add_etc, dedent(commit_msg))
+            self.repo.commit(res.pkg_add_etc,
+                             'Add or upgrade files extracted from a package')
 
         cherry_pick_commit = None
         if res.cherry_pick:
-            self.repo.commit(res.cherry_pick, 'Update with changed /etc files')
-            cherry_pick_commit = self.repo.git_cmd('rev-list -1 HEAD --',
-                                                 do_print=False)
+            self.repo.commit(res.cherry_pick,
+                     'Update with upgraded package files not copied to /etc')
+            cherry_pick_commit = self.repo.git_cmd('rev-list -1 HEAD --')
 
         # Clean the working area.
         self.repo.git_cmd('clean -d -x -f')
@@ -603,7 +601,8 @@ class EtcMerger():
                     warn('adding %s to the master-tmp branch but this file'
                          ' already exists' % fname)
                 copy_from_etc(fname, self.repodir, repo_file=repo_file)
-            self.repo.commit(res.pkg_add_master, 'Add new files from /etc')
+            self.repo.commit(res.pkg_add_master,
+                             'Add files extracted from a package')
 
         return cherry_pick_commit
 
@@ -738,14 +737,15 @@ class EtcMerger():
                                  fname)
 
 def dispatch_help(args):
-    """Use 'help <command>' to get help on the command."""
+    """get help on a command"""
     command = args.subcommand
     if command is None:
         command = 'help'
     args.parsers[command].print_help()
 
-    cmd_func = getattr(EtcMerger, 'cmd_%s' % command)
-    print('\n' + cmd_func.__doc__)
+    cmd_func = getattr(EtcMerger, 'cmd_%s' % command, None)
+    if cmd_func:
+        print('\n' + cmd_func.__doc__)
 
 def parse_args(argv, namespace):
     def isdir(path):
@@ -760,8 +760,7 @@ def parse_args(argv, namespace):
                              version='%(prog)s ' + __version__)
 
     # The help subparser handles the help for each command.
-    subparsers = main_parser.add_subparsers(title='These are the etcmaint'
-                                                  ' commands')
+    subparsers = main_parser.add_subparsers(title='etcmaint commands')
     parsers = { 'help': main_parser }
     parser = subparsers.add_parser('help', add_help=False,
                                    help=dispatch_help.__doc__.splitlines()[0])
@@ -783,7 +782,7 @@ def parse_args(argv, namespace):
             parser.add_argument('--dry-run', '-n', help='Perform a trial run'
                 ' with no changes made (default: %(default)s)',
                 action='store_true', default=False)
-        if cmd in ('init', 'update'):
+        if cmd in ('create', 'update'):
             parser.add_argument('--verbose', '-v', help='Print the output of'
                 ' the git commands (default: %(default)s)',
                 action='store_true', default=False)
@@ -801,7 +800,7 @@ def parse_args(argv, namespace):
                 ' recursion if a link points to a parent directory of itself'
                 ' (default: "%(default)s")',
                 action='store_true', default=False)
-        if cmd in ('init', 'update', 'sync'):
+        if cmd in ('create', 'update', 'sync'):
             parser.add_argument('--exclude-files', default=EXCLUDE_FILES,
                 type=lambda x: list(os.path.join('etc', y.strip()) for
                 y in x.split(',')), metavar='FILES',
