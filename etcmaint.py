@@ -133,6 +133,7 @@ class GitRepo():
         self.repodir = repodir
         self.verbose = verbose
         self.curbranch = None
+        self.initial_branch = None
         self.git = ('git -C %s' % repodir).split()
 
     def create(self):
@@ -164,7 +165,19 @@ class GitRepo():
                           self.repodir, '.git', 'CHERRY_PICK_HEAD')):
             abort("The previous cherry-pick is empty, please use 'git reset'")
 
+        # Get the initial branch.
+        proc = subprocess.run(self.git + ['symbolic-ref', '--short', 'HEAD'],
+                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        if proc.returncode == 0:
+            self.initial_branch = proc.stdout.splitlines()[0]
+
         self.checkout('master')
+
+    def close(self):
+        if self.initial_branch is not None:
+            self.checkout(self.initial_branch)
+        else:
+            self.checkout('master')
 
     def git_cmd(self, cmd):
         if type(cmd) == str:
@@ -359,7 +372,7 @@ class EtcMerger():
         self.timestamp.new()
 
         self.update_repository()
-        self.repo.checkout('master')
+        self.repo.close()
         print('Git repository created at %s' % self.repodir)
 
     def cmd_update(self):
@@ -377,7 +390,7 @@ class EtcMerger():
         if self.update_repository():
             if self.results:
                 print(self.results)
-            self.repo.checkout('master')
+            self.repo.close()
             print("'update' command terminated: no file to sync to /etc")
 
     def cmd_diff(self):
@@ -407,7 +420,7 @@ class EtcMerger():
                                     prefixes=self.exclude)
         repo_files = list_files(os.path.join(self.repodir, 'etc'))
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
-        self.repo.checkout('master')
+        self.repo.close()
 
     def cmd_sync(self):
         """Synchronize /etc with the files in the 'master' branch.
@@ -416,7 +429,7 @@ class EtcMerger():
         """
         self.repo.init()
         self.finalize()
-        self.repo.checkout('master')
+        self.repo.close()
         print("'sync' command terminated")
 
     def create_tmp_branches(self):
