@@ -46,12 +46,6 @@ def abort(msg):
 def warn(msg):
     print('*** warning:', msg, file=sys.stderr)
 
-def path_sha1(path):
-    h = hashlib.sha1()
-    with open(path, 'rb') as f:
-        h.update(f.read())
-    return h.digest()
-
 def list_files(path, suffixes=None, prefixes=None):
     """List of the relative paths of the regular files in path.
 
@@ -106,7 +100,9 @@ def copy_from_etc(rpath, repodir, repo_file=None):
     if dirname and not os.path.isdir(dirname):
         os.makedirs(dirname)
     etc_file = os.path.join('/', rpath)
-    shutil.copy(etc_file, dirname)
+    if os.path.islink(repo_file):
+        os.remove(repo_file)
+    shutil.copy(etc_file, dirname, follow_symlinks=False)
 
 def str_file_list(header, files):
     if files:
@@ -124,13 +120,13 @@ def change_cwd(path):
     finally:
         os.chdir(saved_dir)
 
-Sha1File = namedtuple('Sha1File', ['abspath', 'sha1'])
+FileDigest = namedtuple('FileDigest', ['abspath', 'digest'])
 
 class GitRepo():
     """A git repository."""
 
     def __init__(self, repodir, verbose):
-        self.repodir = repodir
+        self.repodir = repodir.rstrip(os.sep)
         self.verbose = verbose
         self.curbranch = None
         self.initial_branch = None
@@ -230,19 +226,19 @@ class GitRepo():
         return subprocess.run(self.git + ['cherry-pick', '-x', commit],
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
 
-    def tracked_files(self, branch, exclude=None, with_sha1=False):
+    def tracked_files(self, branch, exclude=None, with_digest=False):
         """A dictionary of the tracked files in this branch."""
         d = {}
         ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
                                branch)
-        if with_sha1:
+        if with_digest:
             self.checkout(branch)
         for fname in ls_tree.splitlines():
             if exclude and fname in exclude:
                 continue
-            if with_sha1:
+            if with_digest:
                 path = os.path.join(self.repodir, fname)
-                d[fname] = Sha1File(path, path_sha1(path))
+                d[fname] = FileDigest(path, self.digest(path))
             else:
                 d[fname] = None
         return d
@@ -251,6 +247,23 @@ class GitRepo():
     def branches(self):
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
         return branches.splitlines()
+
+    def digest(self, path):
+        if os.path.islink(path):
+            # The digest is the canonical path of the /etc file linked to the
+            # symlink.
+            path = os.path.realpath(path)
+            if path.startswith(self.repodir):
+                path = path[len(self.repodir):]
+            return path
+
+        try:
+            h = hashlib.sha1()
+            with open(path, 'rb') as f:
+                h.update(f.read())
+            return h.digest()
+        except OSError:
+            return None
 
 class Timestamp():
     def __init__(self, merger):
@@ -371,6 +384,7 @@ class EtcMerger():
         self.repo.checkout('etc', create=True)
         self.timestamp.new()
 
+        self.repo.checkout('master')
         self.update_repository()
         self.repo.close()
         print('Git repository created at %s' % self.repodir)
@@ -569,18 +583,14 @@ class EtcMerger():
     def git_user_updates(self):
         """Update master-tmp with the user changes."""
 
-        def etc_sha1file(fname):
+        def etc_filedisgest(fname):
             etc_file = os.path.join('/etc', fname)
-            try:
-                sha1 = path_sha1(etc_file)
-            except OSError:
-                sha1 = None
-            return Sha1File(etc_file, sha1)
+            return FileDigest(etc_file, self.repo.digest(etc_file))
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = {n: etc_sha1file(n) for
+        etc_files = {n: etc_filedisgest(n) for
                          n in list_files('/etc', suffixes=suffixes)}
-        etc_tracked = self.repo.tracked_files('etc-tmp', with_sha1=True)
+        etc_tracked = self.repo.tracked_files('etc-tmp', with_digest=True)
 
         # Build the list of etc-tmp files that are different from their
         # counterpart in /etc.
@@ -588,10 +598,11 @@ class EtcMerger():
         for fname in etc_files:
             name = etc_files[fname].abspath[1:]
             if name in etc_tracked:
-                if etc_files[fname].sha1 != etc_tracked[name].sha1:
+                if etc_files[fname].digest != etc_tracked[name].digest:
                     to_check_in_master.append(name)
 
-        master_tracked = self.repo.tracked_files('master-tmp', with_sha1=True)
+        master_tracked = self.repo.tracked_files('master-tmp',
+                                                 with_digest=True)
 
         # Build the list of master-tmp files:
         #   * To add when the file does not exist in master-tmp and its
@@ -604,8 +615,8 @@ class EtcMerger():
                 res.user_added.append(fname)
         for fname in etc_files:
             name = etc_files[fname].abspath[1:]
-            if name in master_tracked:
-                if etc_files[fname].sha1 != master_tracked[name].sha1:
+            if name in master_tracked and name not in res.pkg_add_master:
+                if etc_files[fname].digest != master_tracked[name].digest:
                     res.user_updated.append(name)
 
         if res.user_added or res.user_updated:
@@ -646,7 +657,7 @@ class EtcMerger():
                          ' already exists' % fname)
                 copy_from_etc(fname, self.repodir, repo_file=repo_file)
             self.repo.commit(res.pkg_add_master,
-                             'Add files extracted from a package')
+                         'Add files after scanning new or upgraded packages')
 
         return cherry_pick_commit
 
@@ -693,12 +704,9 @@ class EtcMerger():
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
                 # Remember the sha1 of the existing file, if it exists.
-                try:
-                    sha1_of_previous = path_sha1(os.path.join(self.repodir,
-                                                              tarinfo.name))
-                except OSError:
-                    sha1_of_previous = b''
-                extracted[tarinfo.name] = sha1_of_previous
+                dgst_of_previous = self.repo.digest(os.path.join(self.repodir,
+                                                    tarinfo.name))
+                extracted[tarinfo.name] = dgst_of_previous
             tar.extractall(self.repodir,
                            members=etc_files_filter(tar.getmembers()))
 
@@ -752,29 +760,28 @@ class EtcMerger():
 
         res = self.results
         for fname in extracted:
-            sha1_fname = path_sha1(os.path.join(self.repodir, fname))
+            dgst_fname = self.repo.digest(os.path.join(self.repodir, fname))
             etc_file = os.path.join('/', fname)
-            try:
-                sha1_etc_file = path_sha1(etc_file)
-            except OSError:
+            dgst_etc_file = self.repo.digest(etc_file)
+            if dgst_etc_file is None:
                 warn('skip %s: not readable' % etc_file)
                 continue
 
             # A new package install.
             if fname not in etc_tracked:
                 res.pkg_add_etc.append(fname)
-                if sha1_etc_file != sha1_fname:
+                if dgst_etc_file != dgst_fname:
                     res.pkg_add_master.append(fname)
             # A package upgrade.
             else:
-                previous_sha1_fname = extracted[fname]
-                if sha1_etc_file == sha1_fname:
-                    if previous_sha1_fname != sha1_fname:
+                previous_dgst_fname = extracted[fname]
+                if dgst_etc_file == dgst_fname:
+                    if previous_dgst_fname != dgst_fname:
                         res.pkg_add_etc.append(fname)
                         if fname in master_tracked:
                             warn('%s exists in the master branch' % fname)
                 else:
-                    if previous_sha1_fname != sha1_fname:
+                    if previous_dgst_fname != dgst_fname:
                         res.cherry_pick.append(fname)
                         if fname not in master_tracked:
                             warn('%s does not exist in the master branch' %
