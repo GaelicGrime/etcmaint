@@ -89,8 +89,8 @@ def repository_dir():
         xdg_data_home = os.path.join(home, '.local/share')
     return os.path.join(xdg_data_home, 'etcmaint')
 
-def copy_from_etc(rpath, repodir, repo_file=None):
-    """Copy a file on /etc to the repository.
+def copy_from_etc(root_dir, rpath, repodir, repo_file=None):
+    """Copy a file on 'root_dir' to the repository.
 
     'rpath' is the relative path to the repository directory.
     """
@@ -100,7 +100,7 @@ def copy_from_etc(rpath, repodir, repo_file=None):
     dirname = os.path.dirname(repo_file)
     if dirname and not os.path.isdir(dirname):
         os.makedirs(dirname)
-    etc_file = os.path.join('/', rpath)
+    etc_file = os.path.join(root_dir, rpath)
     if os.path.islink(repo_file):
         os.remove(repo_file)
     shutil.copy(etc_file, dirname, follow_symlinks=False)
@@ -251,7 +251,7 @@ class GitRepo():
 
     def digest(self, path):
         if os.path.islink(path):
-            # The digest is the canonical path of the /etc file linked to the
+            # The digest is the canonical path of the file linked to the
             # symlink.
             path = os.path.realpath(path)
             if path.startswith(self.repodir):
@@ -376,9 +376,7 @@ class EtcMerger():
         try:
             res = method()
             if isinstance(res, str):
-                if self.dry_run:
-                    res += ' (dry-run)'
-                print(res)
+                print(res % ('[dry-run] ' if self.dry_run else ''))
         finally:
             self.repo.close()
 
@@ -413,11 +411,16 @@ class EtcMerger():
         subcommand, the previous temporary branches being discarded in that
         case.
         """
-        if self.update_repository():
+        res = self.update_repository()
+        if isinstance(res, str):
+            res += dedent("""\
+            %s'update' command terminated, use the 'sync' command to
+            copy the changes to /etc and fast-forward the changes to the
+            master branch""")
+        else:
             res = str(self.results)
-            if res:
-                print(res)
-            return "'update' command terminated: no file to sync to /etc"
+            res += "%s'update' command terminated: no file to sync to /etc"
+        return res
 
     def cmd_diff(self):
         """Print the list of /etc file names not in the 'etc' branch.
@@ -440,15 +443,20 @@ class EtcMerger():
             self.repo.checkout('etc')
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = list_files('/etc', suffixes=suffixes,
-                                    prefixes=self.exclude)
+        etc_files = list_files(os.path.join(self.root_dir, 'etc'),
+                               suffixes=suffixes, prefixes=self.exclude)
         repo_files = list_files(os.path.join(self.repodir, 'etc'))
-        print('\n'.join(sorted(set(etc_files).difference(repo_files))))
+        print('\n'.join(os.path.join('etc', f) for f
+                            in sorted(set(etc_files).difference(repo_files))))
 
     def cmd_sync(self):
-        """Synchronize /etc with changes in the last cherry-pick."""
+        """Synchronize /etc with changes in the last merge (cherry-pick).
+
+        When running this command with sudo, use the  -E or --preserve-env
+        command line option of sudo.
+        """
         if not 'master-tmp' in self.repo.branches:
-            return 'no file to sync to /etc'
+            return '%sno file to sync to /etc'
 
         # Find the cherry-pick in the master-tmp branch.
         re_commit = re.compile('^commit (?P<commit>[0-9A-Fa-f]{40})$')
@@ -475,7 +483,7 @@ class EtcMerger():
                                 cherry_pick_commit)
         for rpath in (f for f in res.splitlines() if
                       f not in self.exclude_files):
-            etc_file = os.path.join('/', rpath)
+            etc_file = os.path.join(self.root_dir, rpath)
             if not os.path.isfile(etc_file):
                 warn('%s not synced, does not exist on /etc' % rpath)
                 continue
@@ -499,7 +507,7 @@ class EtcMerger():
             self.repo.checkout('etc-tmp')
             time = self.timestamp.value('CREATE')
             self.fast_forward(time)
-        return "'sync' command terminated"
+        return "%s'sync' command terminated"
 
     def create_tmp_branches(self):
         print('Create the master-tmp and etc-tmp branches')
@@ -544,17 +552,15 @@ class EtcMerger():
         self.git_user_updates()
 
         if cherry_pick_commit:
-            self.git_cherry_pick(cherry_pick_commit)
+            res = self.git_cherry_pick(cherry_pick_commit)
             if self.dry_run:
                 self.remove_tmp_branches()
-                print("'update' command terminated (dry-run)")
-            return False
+            return res
         else:
             if self.dry_run:
                 self.remove_tmp_branches()
             else:
                 self.fast_forward()
-        return True
 
     def git_cherry_pick(self, commit):
         self.repo.checkout('master-tmp')
@@ -565,7 +571,7 @@ class EtcMerger():
                      ' file does not exist' % fname)
 
         self.results.btype = '-tmp'
-        print(self.results)
+        msg = '%s\n' % self.results
 
         # Use a temporary branch for the cherry-pick.
         try:
@@ -576,43 +582,43 @@ class EtcMerger():
                     # Do a fast-forward merge.
                     self.repo.checkout('master-tmp')
                     self.repo.git_cmd('merge cherry-pick')
-                return
+                return msg
             else:
                 conflicts = [x[3:] for x in self.repo.get_status()
                              if 'U' in x[:2]]
-                try:
-                    if conflicts:
-                        self.repo.git_cmd('cherry-pick --abort')
-                    else:
-                        self.repo.git_cmd('reset --hard HEAD')
-                        err = proc.stdout
-                        err += 'etcmaint internal error: no conflicts found'
-                        abort(err)
-                finally:
-                    self.repo.checkout('master-tmp')
+                if conflicts:
+                    self.repo.git_cmd('cherry-pick --abort')
+                else:
+                    self.repo.git_cmd('reset --hard HEAD')
+                    err = proc.stdout
+                    err += 'etcmaint internal error: no conflicts found'
+                    abort(err)
         finally:
-            self.repo.git_cmd('branch --delete cherry-pick')
+            self.repo.checkout('master-tmp')
+            self.repo.git_cmd('branch -D cherry-pick')
 
-        print(str_file_list('List of files with a conflict to resolve first:',
-                            conflicts))
+        msg += '%s\n' % (str_file_list(
+                'List of files with a conflict to resolve first:', conflicts))
 
         # Do the effective cherry-pick now after having printed the list of
         # files with a conflict to resolve.
         if not self.dry_run:
             proc = self.repo.cherry_pick(commit)
             cwd = os.getcwd()
-            print('Please resolve the conflict%s%s' %
-                  ('s' if len(conflicts) > 1 else '',
-                   '' if cwd.startswith(self.repodir) else ' in %s' %
+            msg += ('Please resolve the conflict%s%s\n' %
+                    ('s' if len(conflicts) > 1 else '',
+                     '' if cwd.startswith(self.repodir) else ' in %s' %
                                                             self.repodir))
-            print('*** WITHOUT CHANGING THE COMMIT MESSAGE ***')
-            print('This is the result of the cherry-pick command:')
-            print('\n'.join('  %s' % l for l in
-                            proc.stdout.splitlines()))
-            msg = """\
-            You may use 'git -C %s cherry-pick --abort'
-            and start over later with another 'etcmaint update' command"""
-            print(dedent(msg % self.repodir))
+            msg += '*** WITHOUT CHANGING THE COMMIT MESSAGE ***\n'
+            msg += 'This is the result of the cherry-pick command:\n'
+            msg += '%s\n' % ('\n'.join('  %s' % l for l in
+                             proc.stdout.splitlines()))
+            msg += dedent("""\
+                You may use 'git -C %s cherry-pick --abort'
+                and start over later with another 'etcmaint update' command
+            """ % self.repodir)
+
+        return msg
 
     def git_removed_pkgs(self):
         """Remove files that do not exist in /etc."""
@@ -621,7 +627,7 @@ class EtcMerger():
         exclude=['.gitignore', self.timestamp.fname]
         etc_tracked = self.repo.tracked_files('etc-tmp', exclude=exclude)
         for fname in etc_tracked:
-            etc_file = os.path.join('/', fname)
+            etc_file = os.path.join(self.root_dir, fname)
             if not os.path.isfile(etc_file):
                 res.etc_removed.append(fname)
 
@@ -646,12 +652,12 @@ class EtcMerger():
         """Update master-tmp with the user changes."""
 
         def etc_filedisgest(fname):
-            etc_file = os.path.join('/etc', fname)
+            etc_file = os.path.join(self.root_dir, 'etc', fname)
             return FileDigest(etc_file, self.repo.digest(etc_file))
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = {n: etc_filedisgest(n) for
-                         n in list_files('/etc', suffixes=suffixes)}
+        etc_files = {n: etc_filedisgest(n) for n in
+            list_files(os.path.join(self.root_dir, 'etc'), suffixes=suffixes)}
         etc_tracked = self.repo.tracked_files('etc-tmp', with_digest=True)
 
         # Build the list of etc-tmp files that are different from their
@@ -687,7 +693,7 @@ class EtcMerger():
                 (res.user_added, 'Add files with user changes'),
                 (res.user_updated, 'Update files with user changes')):
             for name in files:
-                copy_from_etc(name, self.repodir)
+                copy_from_etc(self.root_dir, name, self.repodir)
             if files:
                 self.repo.commit(files, commit_msg)
 
@@ -717,7 +723,8 @@ class EtcMerger():
                 if os.path.isfile(repo_file):
                     warn('adding %s to the master-tmp branch but this file'
                          ' already exists' % fname)
-                copy_from_etc(fname, self.repodir, repo_file=repo_file)
+                copy_from_etc(self.root_dir, fname, self.repodir,
+                              repo_file=repo_file)
             self.repo.commit(res.pkg_add_master,
                          'Add files after scanning new or upgraded packages')
 
@@ -823,7 +830,7 @@ class EtcMerger():
         res = self.results
         for fname in extracted:
             dgst_fname = self.repo.digest(os.path.join(self.repodir, fname))
-            etc_file = os.path.join('/', fname)
+            etc_file = os.path.join(self.root_dir, fname)
             dgst_etc_file = self.repo.digest(etc_file)
             if dgst_etc_file is None:
                 warn('skip %s: not readable' % etc_file)
@@ -931,6 +938,9 @@ def parse_args(argv, namespace):
             parser.add_argument('--use-etc-tmp',
                 help='Use the etc-tmp branch instead (default: %(default)s)',
                 action='store_true', default=False)
+        parser.add_argument('--root-dir', default='/',
+            help='Set the root directory of the etc files, mostly used for'
+            ' testing (default: "%(default)s")', type=isdir)
         parsers[cmd] = parser
 
     main_parser.parse_args(argv[1:], namespace=namespace)
