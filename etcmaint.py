@@ -16,7 +16,6 @@ the files on /etc.
 import sys
 import os
 import stat
-import time
 import argparse
 import inspect
 import configparser
@@ -26,6 +25,8 @@ import itertools
 import shutil
 import contextlib
 import subprocess
+import re
+from time import time as _time
 from textwrap import dedent
 from collections import namedtuple
 from subprocess import PIPE, STDOUT, CalledProcessError
@@ -142,8 +143,8 @@ class GitRepo():
 
     def init(self):
         # Check the first commit message.
-        commit = self.git_cmd('rev-list --max-parents=0 --format=%s master --')
-        first_commit_msg = commit.splitlines()[1]
+        res = self.git_cmd('rev-list --max-parents=0 --format=%s master --')
+        commit, first_commit_msg = res.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
                 this is not an etcmaint repository
@@ -166,14 +167,14 @@ class GitRepo():
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
         if proc.returncode == 0:
             self.initial_branch = proc.stdout.splitlines()[0]
-
-        self.checkout('master')
+            self.curbranch = self.initial_branch
 
     def close(self):
-        if self.initial_branch is not None:
-            self.checkout(self.initial_branch)
-        else:
-            self.checkout('master')
+        branch = 'master'
+        if self.initial_branch in self.branches:
+            branch = self.initial_branch
+        if not self.get_status():
+            self.checkout(branch)
 
     def git_cmd(self, cmd):
         if type(cmd) == str:
@@ -269,42 +270,43 @@ class Timestamp():
     def __init__(self, merger):
         self.merger = merger
         self.fname = '.etcmaint_timestamp'
-        self.prefix = 'TIMESTAMP='
         self.path = os.path.join(merger.repodir, self.fname)
 
     def new(self):
         """Create the timestamp file."""
         content = """\
             # This file is created by etcmaint. Its purpose is to record the
-            # time the master (resp. etc) branch has been fast-forwarded to
-            # the master-tmp (resp. etc-tmp) branch.
-            TIMESTAMP=0
+            # time the etc-tmp branch has been created and the time the etc
+            # branch has been fast-forwarded to the etc-tmp branch.
+            CREATE=0
+            FAST-FORWARD=0
         """
         self.merger.repo.add_file(self.fname, content, 'Add the timestamp')
 
     def abort_corrupted(self):
         abort("the '%s' timestamp file is corrupted" % self.fname)
 
-    def now(self):
-        """Set the timestamp to the current time."""
+    def set(self, prefix, time=None):
+        """Set the timestamp."""
+        time = int(_time()) if time is None else time
         prefix_found = False
         with open(self.path, 'r') as f:
             lines = []
             for line in f:
-                if line.startswith(self.prefix):
+                if line.startswith(prefix):
                     prefix_found = True
-                    line = self.prefix + str(int(time.time()))
+                    line = '%s=%s\n' % (prefix, time)
                 lines.append(line)
         if not prefix_found:
             self.abort_corrupted()
         content = ''.join(lines)
-        self.merger.repo.add_file(self.fname, content, 'Update the timestamp')
+        self.merger.repo.add_file(self.fname, content,
+                                  'Set the %s timestamp' % prefix)
 
-    @property
-    def value(self):
+    def value(self, prefix):
         with open(self.path, 'r') as f:
             for line in f:
-                if line.startswith(self.prefix):
+                if line.startswith(prefix):
                     return int(line[line.index('=')+1:])
         self.abort_corrupted()
 
@@ -365,10 +367,16 @@ class EtcMerger():
                 cfg.read_file(f)
             self.cachedir = cfg['options']['CacheDir']
 
-    def run(self):
+    def run(self, command):
         """Run the etcmaint command."""
         self.init()
-        self.func(self)
+        method = getattr(self, command)
+        if command != 'cmd_create':
+            self.repo.init()
+        try:
+            method()
+        finally:
+            self.repo.close()
 
     def cmd_create(self):
         """Create the git repository."""
@@ -385,8 +393,8 @@ class EtcMerger():
         self.timestamp.new()
 
         self.repo.checkout('master')
+        self.repo.init()
         self.update_repository()
-        self.repo.close()
         print('Git repository created at %s' % self.repodir)
 
     def cmd_update(self):
@@ -404,7 +412,6 @@ class EtcMerger():
         if self.update_repository():
             if self.results:
                 print(self.results)
-            self.repo.close()
             print("'update' command terminated: no file to sync to /etc")
 
     def cmd_diff(self):
@@ -418,8 +425,6 @@ class EtcMerger():
 
         pacnew, pacsave and pacorig files are excluded from this list.
         """
-
-        self.repo.init()
         if self.use_etc_tmp:
             if 'etc-tmp' in self.repo.branches:
                 self.repo.checkout('etc-tmp')
@@ -434,16 +439,62 @@ class EtcMerger():
                                     prefixes=self.exclude)
         repo_files = list_files(os.path.join(self.repodir, 'etc'))
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
-        self.repo.close()
 
     def cmd_sync(self):
-        """Synchronize /etc with the files in the 'master' branch.
+        """Synchronize /etc with changes in the last cherry-pick."""
+        if not 'master-tmp' in self.repo.branches:
+            print('no file to sync to /etc')
+            return
 
-        Use rsync to retrofit the last changes after a merge.
-        """
-        self.repo.init()
-        self.finalize()
-        self.repo.close()
+        # Find the cherry-pick in the master-tmp branch.
+        re_commit = re.compile('^commit (?P<commit>[0-9A-Fa-f]{40})$')
+        re_cherry_pick = re.compile(
+                            '^\(cherry picked from commit [0-9A-Fa-f]{40}\)$')
+        res = self.repo.git_cmd('rev-list --format=%b master...master-tmp')
+        cherry_pick_commit = None
+        commit = None
+        for line in res.splitlines():
+            matchobj = re_commit.match(line)
+            if matchobj:
+                commit = matchobj.group('commit')
+                continue
+            matchobj = re_cherry_pick.match(line)
+            if matchobj:
+                cherry_pick_commit = commit
+                break
+        if cherry_pick_commit is None:
+            abort('cannot find a cherry-pick in the master-tmp branch')
+
+        # Copy the files commited in the cherry-pick to /etc.
+        self.repo.checkout('master-tmp')
+        res = self.repo.git_cmd('diff-tree --no-commit-id --name-only -r %s' %
+                                cherry_pick_commit)
+        for rpath in (f for f in res.splitlines() if
+                      f not in self.exclude_files):
+            etc_file = os.path.join('/', rpath)
+            if not os.path.isfile(etc_file):
+                warn('%s not synced, does not exist on /etc' % rpath)
+                continue
+            if not self.dry_run:
+                path = os.path.join(self.repodir, rpath)
+                try:
+                    if not os.path.islink(etc_file):
+                        stat = os.stat(etc_file)
+                    else:
+                        os.remove(etc_file)
+                    shutil.copy(path, etc_file, follow_symlinks=False)
+                    if not os.path.islink(etc_file):
+                        os.chmod(etc_file, stat.st_mode)
+                except OSError as e:
+                    abort(str(e))
+            print(rpath)
+
+        if not self.dry_run:
+            # Remove the temporary branches and update the timestamp to the
+            # time of the etc-tmp branch creation.
+            self.repo.checkout('etc-tmp')
+            time = self.timestamp.value('CREATE')
+            self.fast_forward(time)
         print("'sync' command terminated")
 
     def create_tmp_branches(self):
@@ -457,6 +508,8 @@ class EtcMerger():
                 print("Removing the previous unused '%s' branch" % tmp_branch)
             self.repo.checkout(branch)
             self.repo.checkout(tmp_branch, create=True)
+            if tmp_branch == 'etc-tmp':
+                self.timestamp.set('CREATE')
 
     def remove_tmp_branches(self):
         if not 'master-tmp' in self.repo.branches:
@@ -471,14 +524,13 @@ class EtcMerger():
             self.repo.git_cmd('branch --delete %s' % tmp_branch)
         return True
 
-    def finalize(self):
+    def fast_forward(self, time=None):
         if self.remove_tmp_branches():
             print('Updating the timestamp')
             self.repo.checkout('etc')
-            self.timestamp.now()
+            self.timestamp.set('FAST-FORWARD', time=time)
 
     def update_repository(self):
-        self.repo.init()
         self.create_tmp_branches()
 
         cherry_pick_commit = self.git_upgraded_pkgs()
@@ -492,7 +544,7 @@ class EtcMerger():
             if self.dry_run:
                 self.remove_tmp_branches()
             else:
-                self.finalize()
+                self.fast_forward()
         return True
 
     def git_cherry_pick(self, commit):
@@ -544,6 +596,7 @@ class EtcMerger():
                   ('s' if len(conflicts) > 1 else '',
                    '' if cwd.startswith(self.repodir) else ' in %s' %
                                                             self.repodir))
+            print('*** WITHOUT CHANGING THE COMMIT MESSAGE ***')
             print('This is the result of the cherry-pick command:')
             print('\n'.join('  %s' % l for l in
                             proc.stdout.splitlines()))
@@ -641,7 +694,7 @@ class EtcMerger():
         cherry_pick_commit = None
         if res.cherry_pick:
             self.repo.commit(res.cherry_pick,
-                     'Update with upgraded package files not copied to /etc')
+                     'Merge with upgraded package files not copied to /etc')
             cherry_pick_commit = self.repo.git_cmd('rev-list -1 HEAD --')
 
         # Clean the working area.
@@ -663,7 +716,7 @@ class EtcMerger():
 
     def new_packages(self):
         """Return the packages newer than the timestamp."""
-        timestamp = self.timestamp.value
+        timestamp = self.timestamp.value('FAST-FORWARD')
         exclude_pkgs_len = len(self.exclude_pkgs)
         packages = {}
         for root, *remain in os.walk(self.cachedir,
@@ -820,7 +873,7 @@ def parse_args(argv, namespace):
                                    help=dispatch_help.__doc__.splitlines()[0])
     parser.add_argument('subcommand', choices=parsers, nargs='?',
                         default=None)
-    parser.set_defaults(func=dispatch_help, parsers=parsers)
+    parser.set_defaults(command='dispatch_help', parsers=parsers)
 
     # Add the command subparsers.
     d = dict(inspect.getmembers(EtcMerger, inspect.isfunction))
@@ -831,7 +884,7 @@ def parse_args(argv, namespace):
         func = d[command]
         parser = subparsers.add_parser(cmd, help=func.__doc__.splitlines()[0],
                                        add_help=False)
-        parser.set_defaults(func=func)
+        parser.set_defaults(command=command)
         if cmd in ('update', 'sync'):
             parser.add_argument('--dry-run', '-n', help='Perform a trial run'
                 ' with no changes made (default: %(default)s)',
@@ -872,22 +925,22 @@ def parse_args(argv, namespace):
         parsers[cmd] = parser
 
     main_parser.parse_args(argv[1:], namespace=namespace)
-    if not hasattr(namespace, 'func'):
+    if not hasattr(namespace, 'command'):
         main_parser.error('a command is required')
 
 def main():
-    if os.geteuid() == 0:
-        abort('cannot be executed as a root user')
-
     # Assign the parsed args to the EtcMerger instance.
     merger = EtcMerger()
     parse_args(sys.argv, merger)
 
     # Run the command.
-    if merger.func == dispatch_help:
-        merger.func(merger)
+    if merger.command == 'dispatch_help':
+        func = getattr(sys.modules[__name__], 'dispatch_help')
+        func(merger)
     else:
-        merger.run()
+        if merger.command != 'cmd_sync' and os.geteuid() == 0:
+            abort('cannot be executed as a root user')
+        merger.run(merger.command)
 
 if __name__ == '__main__':
     main()
