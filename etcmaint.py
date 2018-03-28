@@ -374,7 +374,11 @@ class EtcMerger():
         if command != 'cmd_create':
             self.repo.init()
         try:
-            method()
+            res = method()
+            if isinstance(res, str):
+                if self.dry_run:
+                    res += ' (dry-run)'
+                print(res)
         finally:
             self.repo.close()
 
@@ -410,9 +414,10 @@ class EtcMerger():
         case.
         """
         if self.update_repository():
-            if self.results:
-                print(self.results)
-            print("'update' command terminated: no file to sync to /etc")
+            res = str(self.results)
+            if res:
+                print(res)
+            return "'update' command terminated: no file to sync to /etc"
 
     def cmd_diff(self):
         """Print the list of /etc file names not in the 'etc' branch.
@@ -443,8 +448,7 @@ class EtcMerger():
     def cmd_sync(self):
         """Synchronize /etc with changes in the last cherry-pick."""
         if not 'master-tmp' in self.repo.branches:
-            print('no file to sync to /etc')
-            return
+            return 'no file to sync to /etc'
 
         # Find the cherry-pick in the master-tmp branch.
         re_commit = re.compile('^commit (?P<commit>[0-9A-Fa-f]{40})$')
@@ -495,38 +499,40 @@ class EtcMerger():
             self.repo.checkout('etc-tmp')
             time = self.timestamp.value('CREATE')
             self.fast_forward(time)
-        print("'sync' command terminated")
+        return "'sync' command terminated"
 
     def create_tmp_branches(self):
-        print('Creating the master-tmp and etc-tmp branches')
+        print('Create the master-tmp and etc-tmp branches')
         branches = self.repo.branches
         for branch in ('etc', 'master'):
             tmp_branch = '%s-tmp' % branch
             if tmp_branch in branches:
                 self.repo.checkout('master')
                 self.repo.git_cmd('branch --delete --force %s' % tmp_branch)
-                print("Removing the previous unused '%s' branch" % tmp_branch)
+                print("Remove the previous unused '%s' branch" % tmp_branch)
             self.repo.checkout(branch)
             self.repo.checkout(tmp_branch, create=True)
             if tmp_branch == 'etc-tmp':
                 self.timestamp.set('CREATE')
 
-    def remove_tmp_branches(self):
+    def remove_tmp_branches(self, fast_forward=False):
         if not 'master-tmp' in self.repo.branches:
             return False
 
-        print('Removing the master-tmp and etc-tmp branches')
-        # Do a fast-forward merge.
+        print('Remove the master-tmp and etc-tmp branches')
+        if self.repo.curbranch in ('master-tmp', 'etc-tmp'):
+            self.repo.checkout('master')
         for branch in ('master', 'etc'):
             tmp_branch = '%s-tmp' % branch
-            self.repo.checkout(branch)
-            self.repo.git_cmd('merge %s' % tmp_branch)
-            self.repo.git_cmd('branch --delete %s' % tmp_branch)
+            if fast_forward:
+                self.repo.checkout(branch)
+                self.repo.git_cmd('merge %s' % tmp_branch)
+            self.repo.git_cmd('branch -D %s' % tmp_branch)
         return True
 
     def fast_forward(self, time=None):
-        if self.remove_tmp_branches():
-            print('Updating the timestamp')
+        if self.remove_tmp_branches(fast_forward=True):
+            print('Update the timestamp')
             self.repo.checkout('etc')
             self.timestamp.set('FAST-FORWARD', time=time)
 
@@ -539,6 +545,9 @@ class EtcMerger():
 
         if cherry_pick_commit:
             self.git_cherry_pick(cherry_pick_commit)
+            if self.dry_run:
+                self.remove_tmp_branches()
+                print("'update' command terminated (dry-run)")
             return False
         else:
             if self.dry_run:
@@ -584,7 +593,7 @@ class EtcMerger():
         finally:
             self.repo.git_cmd('branch --delete cherry-pick')
 
-        print(str_file_list('List of files with a conflict to resolve:',
+        print(str_file_list('List of files with a conflict to resolve first:',
                             conflicts))
 
         # Do the effective cherry-pick now after having printed the list of
