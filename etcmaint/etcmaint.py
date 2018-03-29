@@ -33,7 +33,7 @@ from subprocess import PIPE, STDOUT, CalledProcessError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 __version__ = '0.1'
-pgm = os.path.basename(sys.argv[0])
+pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
 EXCLUDE_FILES = 'passwd, group, udev/hwdb.bin'
@@ -89,10 +89,10 @@ def repository_dir():
         xdg_data_home = os.path.join(home, '.local/share')
     return os.path.join(xdg_data_home, 'etcmaint')
 
-def copy_from_etc(root_dir, rpath, repodir, repo_file=None):
-    """Copy a file on 'root_dir' to the repository.
+def copy_file(rpath, rootdir, repodir, repo_file=None):
+    """Copy a file on 'rootdir' to the repository.
 
-    'rpath' is the relative path to the repository directory.
+    'rpath' is the relative path to 'rootdir'.
     """
 
     if repo_file is None:
@@ -100,7 +100,7 @@ def copy_from_etc(root_dir, rpath, repodir, repo_file=None):
     dirname = os.path.dirname(repo_file)
     if dirname and not os.path.isdir(dirname):
         os.makedirs(dirname)
-    etc_file = os.path.join(root_dir, rpath)
+    etc_file = os.path.join(rootdir, rpath)
     if os.path.islink(repo_file):
         os.remove(repo_file)
     shutil.copy(etc_file, dirname, follow_symlinks=False)
@@ -361,11 +361,11 @@ class EtcMerger():
 
         if not hasattr(self, 'dry_run'):
             self.dry_run = False
-        if hasattr(self, 'cachedir') and self.cachedir is None:
+        if hasattr(self, 'cache_dir') and self.cache_dir is None:
             cfg = configparser.ConfigParser(allow_no_value=True)
             with open('/etc/pacman.conf') as f:
                 cfg.read_file(f)
-            self.cachedir = cfg['options']['CacheDir']
+            self.cache_dir = cfg['options']['CacheDir']
 
     def run(self, command):
         """Run the etcmaint command."""
@@ -693,7 +693,7 @@ class EtcMerger():
                 (res.user_added, 'Add files with user changes'),
                 (res.user_updated, 'Update files with user changes')):
             for name in files:
-                copy_from_etc(self.root_dir, name, self.repodir)
+                copy_file(name, self.root_dir, self.repodir)
             if files:
                 self.repo.commit(files, commit_msg)
 
@@ -723,8 +723,8 @@ class EtcMerger():
                 if os.path.isfile(repo_file):
                     warn('adding %s to the master-tmp branch but this file'
                          ' already exists' % fname)
-                copy_from_etc(self.root_dir, fname, self.repodir,
-                              repo_file=repo_file)
+                copy_file(fname, self.root_dir, self.repodir,
+                          repo_file=repo_file)
             self.repo.commit(res.pkg_add_master,
                          'Add files after scanning new or upgraded packages')
 
@@ -735,7 +735,7 @@ class EtcMerger():
         timestamp = self.timestamp.value('FAST-FORWARD')
         exclude_pkgs_len = len(self.exclude_pkgs)
         packages = {}
-        for root, *remain in os.walk(self.cachedir,
+        for root, *remain in os.walk(self.cache_dir,
                                      followlinks=self.followlinks):
             with os.scandir(root) as it:
                 for pkg in it:
@@ -909,7 +909,7 @@ def parse_args(argv, namespace):
             parser.add_argument('--verbose', '-v', help='Print the output of'
                 ' the git commands (default: %(default)s)',
                 action='store_true', default=False)
-            parser.add_argument('--cachedir', help='Set pacman cache'
+            parser.add_argument('--cache-dir', help='Set pacman cache'
                 ' directory (override the /etc/pacman.conf setting)',
                 type=isdir)
             parser.add_argument('--exclude-pkgs', default=EXCLUDE_PKGS,
@@ -918,7 +918,7 @@ def parse_args(argv, namespace):
                      ' to be ignored (default: "%(default)s")',
                 metavar='PFXS')
             parser.add_argument('--followlinks',
-                help='Visit directories pointed to by symlinks in cachedir.'
+                help='Visit directories pointed to by symlinks in cache-dir.'
                 ' Be aware that using this option can lead to infinite'
                 ' recursion if a link points to a parent directory of itself'
                 ' (default: "%(default)s")',
