@@ -84,13 +84,12 @@ def list_rpaths(rootdir, subdir, suffixes=None, prefixes=None):
 
 def repository_dir():
     xdg_data_home = os.environ.get('XDG_DATA_HOME')
-    if xdg_data_home is None:
-        home = os.environ.get('HOME')
-        if home is None:
-            print('Error: HOME environment variable not set', file=sys.stderr)
-            sys.exit(1)
-        xdg_data_home = os.path.join(home, '.local/share')
-    return os.path.join(xdg_data_home, 'etcmaint')
+    if xdg_data_home is not None:
+        return os.path.join(xdg_data_home, 'etcmaint')
+
+    sudo_user = os.environ.get('SUDO_USER')
+    login_name = sudo_user if sudo_user and os.getuid() == 0 else ''
+    return os.path.expanduser('~%s/.local/share/etcmaint' % login_name)
 
 def copy_file(rpath, rootdir, repodir, repo_file=None):
     """Copy a file on 'rootdir' to the repository.
