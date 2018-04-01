@@ -17,6 +17,7 @@ import sys
 import os
 import stat
 import argparse
+import pathlib
 import inspect
 import configparser
 import tarfile
@@ -28,7 +29,6 @@ import subprocess
 import re
 from time import time as _time
 from textwrap import dedent
-from collections import namedtuple
 from subprocess import PIPE, STDOUT, CalledProcessError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -40,6 +40,9 @@ EXCLUDE_FILES = 'passwd, group, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
 EXCLUDE_ETC = 'ca-certificates, fonts, ssl/certs'
 
+# The subdirectory of '--root-dir'.
+ROOT_SUBDIR = 'etc'
+
 def abort(msg):
     print('*** %s: error:' % pgm, msg, file=sys.stderr)
     sys.exit(1)
@@ -47,8 +50,8 @@ def abort(msg):
 def warn(msg):
     print('*** warning:', msg, file=sys.stderr)
 
-def list_files(path, suffixes=None, prefixes=None):
-    """List of the relative paths of the regular files in path.
+def list_rpaths(rootdir, subdir, suffixes=None, prefixes=None):
+    """List of the relative paths of the files in rootdir/subdir.
 
     Exclude file names that are a match for one of the suffixes in
     'suffixes' and file names that are a match for one of the prefixes in
@@ -58,7 +61,7 @@ def list_files(path, suffixes=None, prefixes=None):
     flist = []
     suffixes_len = len(suffixes) if suffixes is not None else 0
     prefixes_len = len(prefixes) if prefixes is not None else 0
-    with change_cwd(path):
+    with change_cwd(os.path.join(rootdir, subdir)):
         for root, dirs, files in os.walk('.'):
             for fname in files:
                 rpath = os.path.normpath(os.path.join(root, fname))
@@ -76,7 +79,7 @@ def list_files(path, suffixes=None, prefixes=None):
                             not rpath.startswith(x), prefixes))) !=
                                 prefixes_len):
                         continue
-                flist.append(rpath)
+                flist.append(os.path.join(subdir, rpath))
     return flist
 
 def repository_dir():
@@ -121,7 +124,46 @@ def change_cwd(path):
     finally:
         os.chdir(saved_dir)
 
-FileDigest = namedtuple('FileDigest', ['abspath', 'digest'])
+class EtcPath():
+    def __init__(self, *parts):
+        assert len(parts) >= 2
+        assert parts[-1].startswith(ROOT_SUBDIR)
+        self.parts = parts
+        self.path = pathlib.Path(*parts)
+        self._digest = None
+
+    @property
+    def digest(self):
+        if self._digest is None:
+            try:
+                is_symlink = self.path.is_symlink()
+            except OSError:
+                self._digest = b''
+            else:
+                if is_symlink:
+                    rootdir = os.path.join(*self.parts[:-1])
+                    # The digest is the relative part of the canonical path of
+                    # the file linked by the symlink.
+                    realpath = self.path.resolve()
+                    try:
+                        self._digest = realpath.relative_to(rootdir)
+                    except ValueError:
+                        warn('%s links to %s which is not prefixed with %s' %
+                             (self.path, realpath, rootdir))
+                        self._digest = b''
+                else:
+                    try:
+                        h = hashlib.sha1()
+                        with self.path.open('rb') as f:
+                            h.update(f.read())
+                        self._digest = h.digest()
+                    except OSError:
+                        self._digest = b''
+        return self._digest
+
+    def __eq__(self, other):
+        return (isinstance(other, EtcPath) and self.digest == other.digest and
+                self.digest != b'')
 
 class GitRepo():
     """A git repository."""
@@ -143,8 +185,12 @@ class GitRepo():
 
     def init(self):
         # Check the first commit message.
-        res = self.git_cmd('rev-list --max-parents=0 --format=%s master --')
-        commit, first_commit_msg = res.splitlines()
+        proc = subprocess.run(self.git + ['rev-list', '--max-parents=0',
+                       '--format=%s', 'master', '--'],
+                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        if proc.returncode != 0:
+            abort('no git repository at %s' % self.repodir)
+        commit, first_commit_msg = proc.stdout.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
                 this is not an etcmaint repository
@@ -227,44 +273,23 @@ class GitRepo():
         return subprocess.run(self.git + ['cherry-pick', '-x', commit],
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
 
-    def tracked_files(self, branch, exclude=None, with_digest=False):
+    def tracked_files(self, branch, exclude=None):
         """A dictionary of the tracked files in this branch."""
         d = {}
         ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
                                branch)
-        if with_digest:
-            self.checkout(branch)
         for fname in ls_tree.splitlines():
             if exclude and fname in exclude:
                 continue
-            if with_digest:
-                path = os.path.join(self.repodir, fname)
-                d[fname] = FileDigest(path, self.digest(path))
-            else:
-                d[fname] = None
+            if not fname.startswith(ROOT_SUBDIR):
+                continue
+            d[fname] = EtcPath(self.repodir, fname)
         return d
 
     @property
     def branches(self):
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
         return branches.splitlines()
-
-    def digest(self, path):
-        if os.path.islink(path):
-            # The digest is the canonical path of the file linked to the
-            # symlink.
-            path = os.path.realpath(path)
-            if path.startswith(self.repodir):
-                path = path[len(self.repodir):]
-            return path
-
-        try:
-            h = hashlib.sha1()
-            with open(path, 'rb') as f:
-                h.update(f.read())
-            return h.digest()
-        except OSError:
-            return None
 
 class Timestamp():
     def __init__(self, merger):
@@ -443,11 +468,10 @@ class EtcMerger():
             self.repo.checkout('etc')
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = list_files(os.path.join(self.root_dir, 'etc'),
+        etc_files = list_rpaths(self.root_dir, ROOT_SUBDIR,
                                suffixes=suffixes, prefixes=self.exclude)
-        repo_files = list_files(os.path.join(self.repodir, 'etc'))
-        print('\n'.join(os.path.join('etc', f) for f
-                            in sorted(set(etc_files).difference(repo_files))))
+        repo_files = list_rpaths(self.repodir, ROOT_SUBDIR)
+        print('\n'.join(sorted(set(etc_files).difference(repo_files))))
 
     def cmd_sync(self):
         """Synchronize /etc with changes in the last merge (cherry-pick).
@@ -494,7 +518,10 @@ class EtcMerger():
                         stat = os.stat(etc_file)
                     else:
                         os.remove(etc_file)
-                    shutil.copy(path, etc_file, follow_symlinks=False)
+                    try:
+                        shutil.copy(path, etc_file, follow_symlinks=False)
+                    except OSError as e:
+                        warn(e)
                     if not os.path.islink(etc_file):
                         os.chmod(etc_file, stat.st_mode)
                 except OSError as e:
@@ -623,25 +650,25 @@ class EtcMerger():
     def git_removed_pkgs(self):
         """Remove files that do not exist in /etc."""
 
-        res = self.results
+        rslt = self.results
         exclude=['.gitignore', self.timestamp.fname]
         etc_tracked = self.repo.tracked_files('etc-tmp', exclude=exclude)
         for fname in etc_tracked:
             etc_file = os.path.join(self.root_dir, fname)
             if not os.path.isfile(etc_file):
-                res.etc_removed.append(fname)
+                rslt.etc_removed.append(fname)
 
         # Remove the etc-tmp files that do not exist in /etc.
         commit_msg = 'Remove files missing in /etc'
-        if res.etc_removed:
+        if rslt.etc_removed:
             self.repo.checkout('etc-tmp')
-            self.repo.remove(res.etc_removed, commit_msg)
+            self.repo.remove(rslt.etc_removed, commit_msg)
 
         # Remove the master-tmp files that have been removed in the etc-tmp
         # branch.
         master_remove = []
         master_tracked = self.repo.tracked_files('master-tmp')
-        for fname in res.etc_removed:
+        for fname in rslt.etc_removed:
             if fname in master_tracked:
                 master_remove.append(fname)
         if master_remove:
@@ -651,47 +678,41 @@ class EtcMerger():
     def git_user_updates(self):
         """Update master-tmp with the user changes."""
 
-        def etc_filedisgest(fname):
-            etc_file = os.path.join(self.root_dir, 'etc', fname)
-            return FileDigest(etc_file, self.repo.digest(etc_file))
-
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = {n: etc_filedisgest(n) for n in
-            list_files(os.path.join(self.root_dir, 'etc'), suffixes=suffixes)}
-        etc_tracked = self.repo.tracked_files('etc-tmp', with_digest=True)
+        etc_files = {n: EtcPath(self.root_dir, n) for n in
+                     list_rpaths(self.root_dir, ROOT_SUBDIR,
+                                 suffixes=suffixes)}
+        etc_tracked = self.repo.tracked_files('etc-tmp')
 
         # Build the list of etc-tmp files that are different from their
         # counterpart in /etc.
+        self.repo.checkout('etc-tmp')
         to_check_in_master = []
         for fname in etc_files:
-            name = etc_files[fname].abspath[1:]
-            if name in etc_tracked:
-                if etc_files[fname].digest != etc_tracked[name].digest:
-                    to_check_in_master.append(name)
+            if fname in etc_tracked:
+                if etc_files[fname] != etc_tracked[fname]:
+                    to_check_in_master.append(fname)
 
-        master_tracked = self.repo.tracked_files('master-tmp',
-                                                 with_digest=True)
+        master_tracked = self.repo.tracked_files('master-tmp')
 
         # Build the list of master-tmp files:
         #   * To add when the file does not exist in master-tmp and its
         #     counterpart in etc-tmp is different from the /etc file.
         #   * To update when the file exists in master-tmp and is different
         #     from the /etc file.
-        res = self.results
+        rslt = self.results
         for fname in to_check_in_master:
             if fname not in master_tracked:
-                res.user_added.append(fname)
+                rslt.user_added.append(fname)
+        self.repo.checkout('master-tmp')
         for fname in etc_files:
-            name = etc_files[fname].abspath[1:]
-            if name in master_tracked and name not in res.pkg_add_master:
-                if etc_files[fname].digest != master_tracked[name].digest:
-                    res.user_updated.append(name)
+            if fname in master_tracked and fname not in rslt.pkg_add_master:
+                if etc_files[fname] != master_tracked[fname]:
+                    rslt.user_updated.append(fname)
 
-        if res.user_added or res.user_updated:
-            self.repo.checkout('master-tmp')
         for files, commit_msg in (
-                (res.user_added, 'Add files with user changes'),
-                (res.user_updated, 'Update files with user changes')):
+                (rslt.user_added, 'Add files with user changes'),
+                (rslt.user_updated, 'Update files with user changes')):
             for name in files:
                 copy_file(name, self.root_dir, self.repodir)
             if files:
@@ -701,14 +722,14 @@ class EtcMerger():
         """Update the repository with installed or upgraded packages."""
 
         self.scan_cachedir()
-        res = self.results
-        if res.pkg_add_etc:
-            self.repo.commit(res.pkg_add_etc,
+        rslt = self.results
+        if rslt.pkg_add_etc:
+            self.repo.commit(rslt.pkg_add_etc,
                              'Add or upgrade files extracted from a package')
 
         cherry_pick_commit = None
-        if res.cherry_pick:
-            self.repo.commit(res.cherry_pick,
+        if rslt.cherry_pick:
+            self.repo.commit(rslt.cherry_pick,
                      'Merge with upgraded package files not copied to /etc')
             cherry_pick_commit = self.repo.git_cmd('rev-list -1 HEAD --')
 
@@ -716,16 +737,16 @@ class EtcMerger():
         self.repo.git_cmd('clean -d -x -f')
 
         # Update the master-tmp branch with new files.
-        if res.pkg_add_master:
+        if rslt.pkg_add_master:
             self.repo.checkout('master-tmp')
-            for fname in res.pkg_add_master:
+            for fname in rslt.pkg_add_master:
                 repo_file = os.path.join(self.repodir, fname)
                 if os.path.isfile(repo_file):
                     warn('adding %s to the master-tmp branch but this file'
                          ' already exists' % fname)
                 copy_file(fname, self.root_dir, self.repodir,
                           repo_file=repo_file)
-            self.repo.commit(res.pkg_add_master,
+            self.repo.commit(rslt.pkg_add_master,
                          'Add files after scanning new or upgraded packages')
 
         return cherry_pick_commit
@@ -765,17 +786,18 @@ class EtcMerger():
         def etc_files_filter(members):
             for tarinfo in members:
                 fname = tarinfo.name
-                if (tarinfo.isfile() and fname.startswith('etc') and
+                if (tarinfo.isfile() and fname.startswith(ROOT_SUBDIR) and
                         fname not in self.exclude_files):
                     yield tarinfo
 
         def extract_from(pkg):
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             for tarinfo in etc_files_filter(tar.getmembers()):
-                # Remember the sha1 of the existing file, if it exists.
-                dgst_of_previous = self.repo.digest(os.path.join(self.repodir,
-                                                    tarinfo.name))
-                extracted[tarinfo.name] = dgst_of_previous
+                path = EtcPath(self.repodir, tarinfo.name)
+                # Remember the sha1 of the existing file, if it exists, before
+                # extracting it from the tarball.
+                digest = path.digest
+                extracted[tarinfo.name] = path
             tar.extractall(self.repodir,
                            members=etc_files_filter(tar.getmembers()))
 
@@ -827,31 +849,30 @@ class EtcMerger():
         self.repo.checkout('etc-tmp')
         extracted = self.scan(self.new_packages(), etc_tracked)
 
-        res = self.results
+        rslt = self.results
         for fname in extracted:
-            dgst_fname = self.repo.digest(os.path.join(self.repodir, fname))
-            etc_file = os.path.join(self.root_dir, fname)
-            dgst_etc_file = self.repo.digest(etc_file)
-            if dgst_etc_file is None:
-                warn('skip %s: not readable' % etc_file)
+            repo_path = EtcPath(self.repodir, fname)
+            etc_path = EtcPath(self.root_dir, fname)
+            if etc_path.digest == b'':
+                warn('skip %s: not readable' % etc_path)
                 continue
 
             # A new package install.
             if fname not in etc_tracked:
-                res.pkg_add_etc.append(fname)
-                if dgst_etc_file != dgst_fname:
-                    res.pkg_add_master.append(fname)
+                rslt.pkg_add_etc.append(fname)
+                if etc_path != repo_path:
+                    rslt.pkg_add_master.append(fname)
             # A package upgrade.
             else:
                 previous_dgst_fname = extracted[fname]
-                if dgst_etc_file == dgst_fname:
-                    if previous_dgst_fname != dgst_fname:
-                        res.pkg_add_etc.append(fname)
+                if etc_path == repo_path:
+                    if extracted[fname] != repo_path:
+                        rslt.pkg_add_etc.append(fname)
                         if fname in master_tracked:
                             warn('%s exists in the master branch' % fname)
                 else:
-                    if previous_dgst_fname != dgst_fname:
-                        res.cherry_pick.append(fname)
+                    if extracted[fname] != repo_path:
+                        rslt.cherry_pick.append(fname)
                         if fname not in master_tracked:
                             warn('%s does not exist in the master branch' %
                                  fname)
@@ -925,7 +946,7 @@ def parse_args(argv, namespace):
                 action='store_true', default=False)
         if cmd in ('create', 'update', 'sync'):
             parser.add_argument('--exclude-files', default=EXCLUDE_FILES,
-                type=lambda x: list(os.path.join('etc', y.strip()) for
+                type=lambda x: list(os.path.join(ROOT_SUBDIR, y.strip()) for
                 y in x.split(',')), metavar='FILES',
                 help='A comma separated list of file names to be ignored'
                      ' (default: "%(default)s")')
