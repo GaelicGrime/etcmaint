@@ -43,9 +43,7 @@ EXCLUDE_ETC = 'ca-certificates, fonts, ssl/certs'
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
 
-def abort(msg):
-    print('*** %s: error:' % pgm, msg, file=sys.stderr)
-    sys.exit(1)
+class EmtError(Exception): pass
 
 def warn(msg):
     print('*** warning:', msg, file=sys.stderr)
@@ -177,7 +175,7 @@ class GitRepo():
     def create(self):
         """Create the git repository."""
         if os.path.isdir(self.repodir) and os.listdir(self.repodir):
-            abort('%s is not empty' % self.repodir)
+            raise EmtError('%s is not empty' % self.repodir)
         if not os.path.isdir(self.repodir):
             os.makedirs(self.repodir)
         self.git_cmd('init')
@@ -188,7 +186,7 @@ class GitRepo():
                        '--format=%s', 'master', '--'],
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
         if proc.returncode != 0:
-            abort('no git repository at %s' % self.repodir)
+            raise EmtError('no git repository at %s' % self.repodir)
         commit, first_commit_msg = proc.stdout.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = f"""\
@@ -196,16 +194,17 @@ class GitRepo():
                 found as the first commit message:
                 '{first_commit_msg}'
                 instead of the expected '{FIRST_COMMIT_MSG}' message"""
-            abort(dedent(err_msg))
+            raise EmtError(dedent(err_msg))
 
         status = self.get_status()
         if status:
-            abort('the %s repository is not clean:\n%s' %
+            raise EmtError('the %s repository is not clean:\n%s' %
                   (self.repodir, '\n'.join(status)))
 
         if os.path.isfile(os.path.join(
                           self.repodir, '.git', 'CHERRY_PICK_HEAD')):
-            abort("The previous cherry-pick is empty, please use 'git reset'")
+            raise EmtError("The previous cherry-pick is empty,"
+                           " please use 'git reset'")
 
         # Get the initial branch.
         proc = subprocess.run(self.git + ['symbolic-ref', '--short', 'HEAD'],
@@ -229,7 +228,7 @@ class GitRepo():
                                     universal_newlines=True, stderr=STDOUT)
         except CalledProcessError as e:
             output = str(e) + '\n' + e.output.strip('\n')
-            abort(output)
+            raise EmtError(output)
         output = output.strip('\n')
         if self.verbose and output:
                 print(output)
@@ -308,7 +307,7 @@ class Timestamp():
         self.merger.repo.add_file(self.fname, content, 'Add the timestamp')
 
     def abort_corrupted(self):
-        abort("the '%s' timestamp file is corrupted" % self.fname)
+        raise EmtError("the '%s' timestamp file is corrupted" % self.fname)
 
     def set(self, prefix, time=None):
         """Set the timestamp."""
@@ -498,7 +497,7 @@ class EtcMerger():
                 cherry_pick_commit = commit
                 break
         if cherry_pick_commit is None:
-            abort('cannot find a cherry-pick in the master-tmp branch')
+            raise EmtError('cannot find a cherry-pick in master-tmp branch')
 
         # Copy the files commited in the cherry-pick to /etc.
         self.repo.checkout('master-tmp')
@@ -524,7 +523,7 @@ class EtcMerger():
                     if not os.path.islink(etc_file):
                         os.chmod(etc_file, stat.st_mode)
                 except OSError as e:
-                    abort(str(e))
+                    raise EmtError(str(e))
             print(rpath)
 
         if not self.dry_run:
@@ -618,7 +617,7 @@ class EtcMerger():
                     self.repo.git_cmd('reset --hard HEAD')
                     err = proc.stdout
                     err += 'etcmaint internal error: no conflicts found'
-                    abort(err)
+                    raise EmtError(err)
         finally:
             self.repo.checkout('master-tmp')
             self.repo.git_cmd('branch -D cherry-pick')
@@ -967,19 +966,26 @@ def parse_args(argv, namespace):
     if not hasattr(namespace, 'command'):
         main_parser.error('a command is required')
 
-def main():
+def etcmaint(argv):
     # Assign the parsed args to the EtcMerger instance.
     merger = EtcMerger()
-    parse_args(sys.argv, merger)
+    parse_args(argv, merger)
 
     # Run the command.
     if merger.command == 'dispatch_help':
         func = getattr(sys.modules[__name__], 'dispatch_help')
         func(merger)
     else:
-        if merger.command != 'cmd_sync' and os.geteuid() == 0:
-            abort('cannot be executed as a root user')
+        if merger.command != 'cmd_sync' and os.getuid() == 0:
+            raise EmtError('cannot be executed as a root user')
         merger.run(merger.command)
+
+def main():
+    try:
+        etcmaint(sys.argv)
+    except EmtError as e:
+        print('*** %s: error:' % pgm, e, file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
