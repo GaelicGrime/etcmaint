@@ -38,7 +38,7 @@ RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
 EXCLUDE_FILES = 'passwd, group, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
-EXCLUDE_ETC = 'ca-certificates, fonts, ssl/certs'
+EXCLUDE_PREFIXES = 'ca-certificates, fonts, ssl/certs'
 
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
@@ -101,9 +101,9 @@ def copy_file(rpath, rootdir, repodir, repo_file=None):
     if dirname and not os.path.isdir(dirname):
         os.makedirs(dirname)
     etc_file = os.path.join(rootdir, rpath)
-    if os.path.islink(repo_file):
+    if os.path.islink(etc_file):
         os.remove(repo_file)
-    shutil.copy(etc_file, dirname, follow_symlinks=False)
+    shutil.copy(etc_file, repo_file, follow_symlinks=False)
 
 def str_file_list(header, files):
     if files:
@@ -113,11 +113,11 @@ def str_file_list(header, files):
 
 @contextlib.contextmanager
 def change_cwd(path):
-    """Context manager that temporarily creates and changes the cwd."""
+    """Context manager that temporarily changes the cwd."""
     saved_dir = os.getcwd()
     os.chdir(path)
     try:
-        yield
+        yield os.getcwd()
     finally:
         os.chdir(saved_dir)
 
@@ -227,11 +227,11 @@ class GitRepo():
             output = subprocess.check_output(self.git + cmd,
                                     universal_newlines=True, stderr=STDOUT)
         except CalledProcessError as e:
-            output = str(e) + '\n' + e.output.strip('\n')
+            output = str(e) + '\n' + e.output.strip()
             raise EmtError(output)
-        output = output.strip('\n')
+        output = output.strip()
         if self.verbose and output:
-                print(output)
+            print(output)
         return output
 
     def get_status(self):
@@ -290,10 +290,10 @@ class GitRepo():
         return branches.splitlines()
 
 class Timestamp():
-    def __init__(self, merger):
-        self.merger = merger
+    def __init__(self, emt):
+        self.emt = emt
         self.fname = '.etcmaint_timestamp'
-        self.path = os.path.join(merger.repodir, self.fname)
+        self.path = os.path.join(emt.repodir, self.fname)
 
     def new(self):
         """Create the timestamp file."""
@@ -304,14 +304,14 @@ class Timestamp():
             CREATE=0
             FAST-FORWARD=0
         """
-        self.merger.repo.add_file(self.fname, content, 'Add the timestamp')
+        self.emt.repo.add_file(self.fname, content, 'Add the timestamp')
 
     def abort_corrupted(self):
         raise EmtError("the '%s' timestamp file is corrupted" % self.fname)
 
     def set(self, prefix, time=None):
         """Set the timestamp."""
-        time = int(_time()) if time is None else time
+        time = _time() if time is None else time
         prefix_found = False
         with open(self.path, 'r') as f:
             lines = []
@@ -323,14 +323,14 @@ class Timestamp():
         if not prefix_found:
             self.abort_corrupted()
         content = ''.join(lines)
-        self.merger.repo.add_file(self.fname, content,
+        self.emt.repo.add_file(self.fname, content,
                                   'Set the %s timestamp' % prefix)
 
     def value(self, prefix):
         with open(self.path, 'r') as f:
             for line in f:
                 if line.startswith(prefix):
-                    return int(line[line.index('=')+1:])
+                    return float(line[line.index('=')+1:])
         self.abort_corrupted()
 
 class UpdateResults():
@@ -361,15 +361,15 @@ class UpdateResults():
          f"List of files updated in the 'master{btype}' branch:")
         self.add_list(self.pkg_add_etc,
          f"List of files extracted from a package and added to the"
-         " 'etc{btype}' branch:")
+             f" 'etc{btype}' branch:")
         self.add_list(self.pkg_add_master,
          f"List of files extracted from a package and added to the"
-         " 'master{btype}' branch:")
+             f" 'master{btype}' branch:")
         self.add_list(self.cherry_pick,
          'List of files to sync to /etc:')
         return self.result
 
-class EtcMerger():
+class EtcMaint():
     """Provide methods to implement the commands."""
 
     def __init__(self):
@@ -442,7 +442,7 @@ class EtcMerger():
             master branch""")
         else:
             res = str(self.results)
-            res += "%s'update' command terminated: no file to sync to /etc"
+            res += "\n%s'update' command terminated: no file to sync to /etc"
         return res
 
     def cmd_diff(self):
@@ -467,7 +467,7 @@ class EtcMerger():
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
         etc_files = list_rpaths(self.root_dir, ROOT_SUBDIR,
-                               suffixes=suffixes, prefixes=self.exclude)
+                           suffixes=suffixes, prefixes=self.exclude_prefixes)
         repo_files = list_rpaths(self.repodir, ROOT_SUBDIR)
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
 
@@ -483,7 +483,7 @@ class EtcMerger():
         # Find the cherry-pick in the master-tmp branch.
         re_commit = re.compile('^commit (?P<commit>[0-9A-Fa-f]{40})$')
         re_cherry_pick = re.compile(
-                            '^\(cherry picked from commit [0-9A-Fa-f]{40}\)$')
+                        r'^\(cherry picked from commit [0-9A-Fa-f]{40}\)$')
         res = self.repo.git_cmd('rev-list --format=%b master...master-tmp')
         cherry_pick_commit = None
         commit = None
@@ -798,15 +798,12 @@ class EtcMerger():
                 extracted[tarinfo.name] = path
             tar.extractall(self.repodir,
                            members=etc_files_filter(tar.getmembers()))
+            print('scanned', pkg.name)
 
         extracted = {}
         max_workers = len(os.sched_getaffinity(0)) or 4
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(extract_from, pkg):
-                            pkg for pkg in packages}
-            for future in as_completed(futures):
-                pkg = futures[future]
-                print('scanned', pkg.name)
+            futures = [executor.submit(extract_from, pkg) for pkg in packages]
 
         for fname in extracted:
             if fname not in tracked:
@@ -882,7 +879,7 @@ def dispatch_help(args):
         command = 'help'
     args.parsers[command].print_help()
 
-    cmd_func = getattr(EtcMerger, 'cmd_%s' % command, None)
+    cmd_func = getattr(EtcMaint, 'cmd_%s' % command, None)
     if cmd_func:
         lines = cmd_func.__doc__.splitlines()
         print('\n' + lines[0])
@@ -911,7 +908,7 @@ def parse_args(argv, namespace):
     parser.set_defaults(command='dispatch_help', parsers=parsers)
 
     # Add the command subparsers.
-    d = dict(inspect.getmembers(EtcMerger, inspect.isfunction))
+    d = dict(inspect.getmembers(EtcMaint, inspect.isfunction))
     for command in sorted(d):
         if not command.startswith('cmd_'):
             continue
@@ -949,9 +946,9 @@ def parse_args(argv, namespace):
                 help='A comma separated list of file names to be ignored'
                      ' (default: "%(default)s")')
         if cmd == 'diff':
-            parser.add_argument('--exclude', default=EXCLUDE_ETC,
+            parser.add_argument('--exclude-prefixes',
+                default=EXCLUDE_PREFIXES, metavar='PFXS',
                 type=lambda x: list(y.strip() for y in x.split(',')),
-                metavar='PFXS',
                 help='A comma separated list of prefixes of /etc file'
                 ' names to be ignored (default: "%(default)s")')
             parser.add_argument('--use-etc-tmp',
@@ -967,18 +964,20 @@ def parse_args(argv, namespace):
         main_parser.error('a command is required')
 
 def etcmaint(argv):
-    # Assign the parsed args to the EtcMerger instance.
-    merger = EtcMerger()
-    parse_args(argv, merger)
+    # Assign the parsed args to the EtcMaint instance.
+    emt = EtcMaint()
+    parse_args(argv, emt)
 
     # Run the command.
-    if merger.command == 'dispatch_help':
+    if emt.command == 'dispatch_help':
         func = getattr(sys.modules[__name__], 'dispatch_help')
-        func(merger)
+        func(emt)
     else:
-        if merger.command != 'cmd_sync' and os.getuid() == 0:
+        if emt.command != 'cmd_sync' and os.getuid() == 0:
             raise EmtError('cannot be executed as a root user')
-        merger.run(merger.command)
+        emt.run(emt.command)
+
+    return emt
 
 def main():
     try:
