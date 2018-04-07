@@ -121,6 +121,19 @@ def change_cwd(path):
     finally:
         os.chdir(saved_dir)
 
+@contextlib.contextmanager
+def threadsafe_makedirs():
+    def _makedirs(*args, **kwds):
+        kwds['exist_ok'] = True
+        saved_makedirs(*args[:2], **kwds)
+
+    saved_makedirs = os.makedirs
+    try:
+        os.makedirs = _makedirs
+        yield
+    finally:
+        os.makedirs = saved_makedirs
+
 class EtcPath():
     def __init__(self, *parts):
         assert len(parts) >= 2
@@ -782,29 +795,36 @@ class EtcMaint():
 
     def scan(self, packages, tracked):
         def etc_files_filter(members):
-            for tarinfo in members:
-                fname = tarinfo.name
-                if (tarinfo.isfile() and fname.startswith(ROOT_SUBDIR) and
+            for tinfo in members:
+                fname = tinfo.name
+                if (tinfo.isfile() and fname.startswith(ROOT_SUBDIR) and
                         fname not in self.exclude_files):
-                    yield tarinfo
+                    yield tinfo
 
         def extract_from(pkg):
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
-            for tarinfo in etc_files_filter(tar.getmembers()):
-                path = EtcPath(self.repodir, tarinfo.name)
+            tarinfos = list(etc_files_filter(tar.getmembers()))
+            for tinfo in tarinfos:
+                path = EtcPath(self.repodir, tinfo.name)
                 # Remember the sha1 of the existing file, if it exists, before
                 # extracting it from the tarball.
                 digest = path.digest
-                extracted[tarinfo.name] = path
-            tar.extractall(self.repodir,
-                           members=etc_files_filter(tar.getmembers()))
+                extracted[tinfo.name] = path
+            tar.extractall(self.repodir, members=tarinfos)
             print('scanned', pkg.name)
 
         extracted = {}
         max_workers = len(os.sched_getaffinity(0)) or 4
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(extract_from, pkg) for pkg in packages]
-
+        # Extracting from tarfiles is not thread safe (see msg315067 in bpo
+        # issue https://bugs.python.org/issue23649).
+        with threadsafe_makedirs():
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(extract_from, pkg) for
+                           pkg in packages]
+        for f in futures:
+            exc = f.exception()
+            if exc is not None:
+                raise exc
         for fname in extracted:
             if fname not in tracked:
                 # Ensure that the file can be overwritten on a next
@@ -849,7 +869,7 @@ class EtcMaint():
             repo_path = EtcPath(self.repodir, fname)
             etc_path = EtcPath(self.root_dir, fname)
             if etc_path.digest == b'':
-                warn('skip %s: not readable' % etc_path)
+                warn('skip %s: not readable' % fname)
                 continue
 
             # A new package install.
