@@ -328,6 +328,23 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['b'])
 
+    def test_update_with_upgraded_package_no_etc_change(self):
+        # Check that a new released package, with no change in the /etc files,
+        # does not add new files to the etc branch.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        self.stdout.seek(0)
+        self.stdout.truncate(0)
+        self.cmd.add_package('package', files, release=2)
+        self.run_cmd('update')
+        self.check_results([], ['a'])
+        self.assertNotIn("List of files extracted from a package and added to"
+                         " the 'etc' branch", self.stdout.getvalue())
+
     def test_update_with_new_package(self):
         self.cmd.add_etc_files({'a': 'content'})
         self.cmd.add_package('package_a', {'a': 'content'})
