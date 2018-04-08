@@ -160,8 +160,8 @@ class CommandLineTestCase(BaseTestCase):
     def test_cl_main_help(self):
         self.make_base_dirs()
         self.run_cmd('help', with_rootdir=False)
-        self.assertIn('Arch Linux tool for the maintenance of /etc files',
-                      self.stdout.getvalue())
+        self.assertIn('Arch Linux tool that uses git for the maintenance'
+                      ' of /etc files', self.stdout.getvalue())
 
     def test_cl_create_help(self):
         self.make_base_dirs()

@@ -1,16 +1,14 @@
 #! /bin/env python
-"""An Arch Linux tool for the maintenance of /etc files.
+"""An Arch Linux tool that uses git for the maintenance of /etc files.
 
 The /etc files installed or upgraded by Arch Linux packages are managed in
 the 'etc' branch of a git repository. The /etc files customized or created by
-a user are managed in the 'master' branch. The git repository is located at
-$XDG_DATA_HOME/etcmaint if the XDG_DATA_HOME environment variable is set and
-at $HOME/.local/share/etcmaint otherwise.
+the user are managed in the 'master' branch.
 
-The upgraded packages changes of user-customized files are merged (actually
-cherry-picked) by etcmaint. Merge conflicts must be resolved by the user.
-After the merge, the 'sync' subcommand is used to retrofit those changes to
-the files on /etc.
+The upgraded package changes of the user-customized files are merged (actually
+cherry-picked) with the 'update' subcommand. Merge conflicts must be resolved
+and commited by the user. After a merge, the 'sync' subcommand is used to
+retrofit those changes to /etc.
 """
 
 import sys
@@ -28,7 +26,7 @@ import contextlib
 import subprocess
 import re
 from time import time as _time
-from textwrap import dedent
+from textwrap import dedent, wrap
 from subprocess import PIPE, STDOUT, CalledProcessError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -428,7 +426,18 @@ class EtcMaint():
             self.repo.close()
 
     def cmd_create(self):
-        """Create the git repository."""
+        """Create the git repository.
+
+        The git repository is located at $XDG_DATA_HOME/etcmaint if the
+        XDG_DATA_HOME environment variable is set and at
+        $HOME/.local/share/etcmaint otherwise.
+
+        The 'diff' subcommand may be used now to list the files added to /etc
+        by the user. If any of those files is added (and commited) to the
+        'master' branch, the 'update' subcommand will track future changes
+        made to those files in /etc and include these changes to the 'master'
+        branch.
+        """
         self.repo.create()
 
         # Add .gitignore.
@@ -452,11 +461,16 @@ class EtcMaint():
         The changes are done in temporary branches named 'master-tmp' and
         'etc-tmp'. When the changes do not incur a merge, the 'master' (resp.
         'etc') branch is fast-forwarded to its temporary branch and the
-        temporary branch deleted. Otherwise this fast-forwarding is postponed
-        until the merge is synced to /etc with the 'sync' subcommand. Until
-        then it is still possible to start over with a new 'update'
-        subcommand, the previous temporary branches being discarded in that
+        temporary branches deleted. The operation is complete. Otherwise the
+        fast-forwarding is postponed until the merge is synced to /etc with
+        the 'sync' subcommand and the fast-forwarding is done by this command.
+        Until then it is still possible to start over with a new 'update'
+        subcommand, the previous temporary branches are discarded in that
         case.
+
+        When a merge is pending and if packages are being upgraded before the
+        'sync' subcommand, the next 'update' subcommand following the 'sync'
+        subcommand will take those packages into account.
         """
         res = self.update_repository()
         if isinstance(res, str):
@@ -470,7 +484,7 @@ class EtcMaint():
         return res
 
     def cmd_diff(self):
-        """Print the list of /etc file names not in the 'etc' branch.
+        """Print the list of /etc file names not tracked in the 'etc' branch.
 
         These are the /etc files not created from an Arch Linux package. Among
         them and of interest are the files created by a user that one may want
@@ -496,10 +510,10 @@ class EtcMaint():
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
 
     def cmd_sync(self):
-        """Synchronize /etc with changes in the last merge (cherry-pick).
+        """Synchronize /etc with the changes made in the last merge.
 
-        When running this command with sudo, use the  -E or --preserve-env
-        command line option of sudo.
+        This command must be run with sudo or as root when using the
+        --root-dir default value.
         """
         if not 'master-tmp' in self.repo.branches:
             return '%sno file to sync to /etc'
@@ -919,8 +933,18 @@ def dispatch_help(args):
     cmd_func = getattr(EtcMaint, 'cmd_%s' % command, None)
     if cmd_func:
         lines = cmd_func.__doc__.splitlines()
-        print('\n' + lines[0])
-        print(dedent('\n'.join(lines[1:])), end='')
+        print('\n%s\n' % lines[0])
+        paragraph = []
+        for l in dedent('\n'.join(lines[2:])).splitlines():
+            if l == '':
+                if paragraph:
+                    print('\n'.join(wrap(' '.join(paragraph), width=78)))
+                    print()
+                    paragraph = []
+                continue
+            paragraph.append(l)
+        if paragraph:
+            print('\n'.join(wrap(' '.join(paragraph), width=78)))
 
 def parse_args(argv, namespace):
     def isdir(path):
@@ -977,13 +1001,13 @@ def parse_args(argv, namespace):
             parser.add_argument('--exclude-files', default=EXCLUDE_FILES,
                 type=lambda x: list(os.path.join(ROOT_SUBDIR, y.strip()) for
                 y in x.split(',')), metavar='FILES',
-                help='A comma separated list of file names to be ignored'
+                help='A comma separated list of /etc path names to be ignored'
                      ' (default: "%(default)s")')
         if cmd == 'diff':
             parser.add_argument('--exclude-prefixes',
                 default=EXCLUDE_PREFIXES, metavar='PFXS',
                 type=lambda x: list(y.strip() for y in x.split(',')),
-                help='A comma separated list of prefixes of /etc file'
+                help='A comma separated list of prefixes of /etc path'
                 ' names to be ignored (default: "%(default)s")')
             parser.add_argument('--use-etc-tmp',
                 help='Use the etc-tmp branch instead (default: %(default)s)',
