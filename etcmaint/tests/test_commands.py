@@ -18,6 +18,7 @@ from etcmaint.etcmaint import (change_cwd, etcmaint, ROOT_SUBDIR, EtcPath,
 ROOT_DIR = 'root'
 REPO_DIR = 'repo'
 CACHE_DIR = 'cache'
+AUR_DIR = 'aur'
 ROOT_SUBDIR_LEN = len(ROOT_SUBDIR)
 
 @contextmanager
@@ -73,11 +74,13 @@ class Command():
     def add_etc_files(self, files):
         self.add_files(files, self.root_dir)
 
-    def add_package(self, name, files, version='1.0', release='1'):
-        """Add a package to 'cache_dir'."""
-        if not os.path.isdir(self.cache_dir):
-            os.makedirs(self.cache_dir)
-        pkg_name = os.path.join(self.cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
+    def add_package(self, name, files, version='1.0', release='1',
+                    cache_dir=None):
+        """Add a package."""
+        cache_dir = self.cache_dir if cache_dir is None else cache_dir
+        if not os.path.isdir(cache_dir):
+            os.makedirs(cache_dir)
+        pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
                                 (name, version, release, os.uname().machine))
         with temp_cwd():
             self.add_files(files)
@@ -121,6 +124,19 @@ class BaseTestCase(TestCase):
 
     def print_stderr(self):
         print('\n%s' % self.stderr.getvalue(), file=self._stderr)
+
+    @contextmanager
+    def check_output(self, strio, equal=None, is_in=None, is_notin=None):
+        strio.seek(0)
+        strio.truncate(0)
+        yield
+        out = strio.getvalue()
+        if equal is not None:
+            self.assertEqual(equal, out)
+        if is_in is not None:
+            self.assertIn(is_in, out)
+        if is_notin is not None:
+            self.assertNotIn(is_notin, out)
 
 class CommandLineTestCase(BaseTestCase):
     """Test the command line."""
@@ -213,6 +229,17 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'], ['etc', 'master'])
         self.check_content('etc', 'a', 'content')
+
+    def test_create_aur_package(self):
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        files = {'b': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('aur package', files,
+                             cache_dir=os.path.join(self.tmpdir, AUR_DIR))
+        self.run_cmd('create', '--aur-dir', AUR_DIR)
+        self.check_results([], ['a', 'b'])
 
     def test_create_symlink_abspath(self):
         files = {'a': 'content', 'b': SymLink('a', True)}
@@ -337,13 +364,11 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'])
 
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
-        self.cmd.add_package('package', files, release=2)
-        self.run_cmd('update')
-        self.check_results([], ['a'])
-        self.assertNotIn("List of files extracted from a package and added to"
-                         " the 'etc' branch", self.stdout.getvalue())
+        with self.check_output(self.stdout, is_notin="List of files extracted"
+                             " from a package and added to the 'etc' branch"):
+            self.cmd.add_package('package', files, release=2)
+            self.run_cmd('update')
+            self.check_results([], ['a'])
 
     def test_update_with_new_package(self):
         self.cmd.add_etc_files({'a': 'content'})
@@ -365,17 +390,15 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_results([], ['a'], ['etc', 'master'])
         self.check_content('etc', 'a', 'a content')
 
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
         files = {'b': 'b content'}
         self.cmd.add_etc_files(files)
         pkg_b = self.cmd.add_package('package_b', files)
-        self.run_cmd('update')
-        self.check_results([], ['a', 'b'], ['etc', 'master'])
-        self.check_content('etc', 'b', 'b content')
-        out = self.stdout.getvalue()
-        self.assertNotIn('scanned %s' % os.path.basename(pkg_a), out)
-        self.assertIn('scanned %s' % os.path.basename(pkg_b), out)
+        with self.check_output(self.stdout,
+                is_in='scanned %s' % os.path.basename(pkg_b),
+                is_notin='scanned %s' % os.path.basename(pkg_a)):
+            self.run_cmd('update')
+            self.check_results([], ['a', 'b'], ['etc', 'master'])
+            self.check_content('etc', 'b', 'b content')
 
     def test_update_dry_run(self):
         # Check that two consecutive updates in dry-run mode give the same
@@ -607,11 +630,10 @@ class DiffTestCase(CommandsTestCase):
         self.check_content('master', 'a', 'content of a')
         self.check_content('etc', 'a', 'package content')
 
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
-        self.run_cmd('diff')
-        self.assertIn('\n'.join(os.path.join(ROOT_SUBDIR, x) for
-                                x in ['b', 'c']), self.stdout.getvalue())
+        with self.check_output(self.stdout,
+                is_in='\n'.join(os.path.join(ROOT_SUBDIR, x) for
+                x in ['b', 'c'])):
+            self.run_cmd('diff')
 
     def test_diff_exclude_prefixes(self):
         files = {f: 'content of %s' % f for f in
@@ -623,12 +645,10 @@ class DiffTestCase(CommandsTestCase):
         self.check_content('master', 'a_file', 'content of a_file')
         self.check_content('etc', 'a_file', 'package content')
 
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
-        self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar')
-        out = self.stdout.getvalue()
-        self.assertNotIn(os.path.join(ROOT_SUBDIR, 'b_file'), out)
-        self.assertIn(os.path.join(ROOT_SUBDIR, 'c_file'), out)
+        with self.check_output(self.stdout,
+                is_in=os.path.join(ROOT_SUBDIR, 'c_file'),
+                is_notin=os.path.join(ROOT_SUBDIR, 'b_file')):
+            self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar')
 
     def test_diff_use_etc_tmp_no_tmp(self):
         files = {'a': 'content'}
@@ -658,13 +678,8 @@ class DiffTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['a'], ['etc', 'etc-tmp', 'master',
                                           'master-tmp'])
-
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
-        self.run_cmd('diff')
-        self.assertIn(os.path.join(ROOT_SUBDIR, 'b'), self.stdout.getvalue())
-
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
-        self.run_cmd('diff', '--use-etc-tmp')
-        self.assertEqual(self.stdout.getvalue().strip(), '')
+        with self.check_output(self.stdout,
+                is_in=os.path.join(ROOT_SUBDIR, 'b')):
+            self.run_cmd('diff')
+        with self.check_output(self.stdout, equal='\n'):
+            self.run_cmd('diff', '--use-etc-tmp')

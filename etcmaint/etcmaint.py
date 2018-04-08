@@ -773,13 +773,12 @@ class EtcMaint():
 
         return cherry_pick_commit
 
-    def new_packages(self):
+    def new_packages(self, cache_dir):
         """Return the packages newer than the timestamp."""
         timestamp = self.timestamp.value('FAST-FORWARD')
         exclude_pkgs_len = len(self.exclude_pkgs)
         packages = {}
-        for root, *remain in os.walk(self.cache_dir,
-                                     followlinks=self.followlinks):
+        for root, *remain in os.walk(cache_dir):
             with os.scandir(root) as it:
                 for pkg in it:
                     pkg_name = pkg.name
@@ -802,6 +801,8 @@ class EtcMaint():
                         packages[name] = pkg
                     elif packages[name].name < pkg_name:
                         packages[name] = pkg
+            if cache_dir == self.cache_dir:
+                break
         return packages.values()
 
     def scan(self, packages, tracked):
@@ -874,7 +875,11 @@ class EtcMaint():
         master_tracked = self.repo.tracked_files('master-tmp')
         etc_tracked = self.repo.tracked_files('etc-tmp')
         self.repo.checkout('etc-tmp')
-        extracted = self.scan(self.new_packages(), etc_tracked)
+        packages = self.new_packages(self.cache_dir)
+        if self.aur_dir is not None:
+            packages = itertools.chain(packages,
+                                       self.new_packages(self.aur_dir))
+        extracted = self.scan(packages, etc_tracked)
 
         rslt = self.results
         for fname in extracted:
@@ -958,19 +963,16 @@ def parse_args(argv, namespace):
                 ' the git commands (default: %(default)s)',
                 action='store_true', default=False)
             parser.add_argument('--cache-dir', help='Set pacman cache'
-                ' directory (override the /etc/pacman.conf setting)',
+                ' directory (override the /etc/pacman.conf setting of the'
+                ' CacheDir option)', type=isdir)
+            parser.add_argument('--aur-dir', help='Set the path of the '
+                'directory where to look recursively for built AUR packages',
                 type=isdir)
             parser.add_argument('--exclude-pkgs', default=EXCLUDE_PKGS,
                 type=lambda x: list(y.strip() for y in x.split(',')),
                 help='A comma separated list of prefix of package names'
                      ' to be ignored (default: "%(default)s")',
                 metavar='PFXS')
-            parser.add_argument('--followlinks',
-                help='Visit directories pointed to by symlinks in cache-dir.'
-                ' Be aware that using this option can lead to infinite'
-                ' recursion if a link points to a parent directory of itself'
-                ' (default: "%(default)s")',
-                action='store_true', default=False)
         if cmd in ('create', 'update', 'sync'):
             parser.add_argument('--exclude-files', default=EXCLUDE_FILES,
                 type=lambda x: list(os.path.join(ROOT_SUBDIR, y.strip()) for
