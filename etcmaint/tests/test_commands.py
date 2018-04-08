@@ -9,6 +9,7 @@ import time
 from argparse import ArgumentError
 from contextlib import contextmanager, ExitStack
 from textwrap import dedent
+from collections import namedtuple
 from unittest import mock, TestCase
 
 from etcmaint.etcmaint import (change_cwd, etcmaint, ROOT_SUBDIR, EtcPath,
@@ -42,6 +43,8 @@ def raise_context_of_exit(func, *args, **kwds):
         e = e.__context__ if isinstance(e.__context__, Exception) else e
         raise e from None
 
+SymLink = namedtuple('SymLink', ['linkto', 'abspath'])
+
 class Command():
     """Helper to build an etcmaint command."""
 
@@ -51,14 +54,21 @@ class Command():
         self.root_dir = os.path.join(self.tmpdir, ROOT_DIR)
 
     def add_files(self, files, dir_path=''):
-        """'files' is a dictionary of file names mapped to their content."""
+        """'files' dictionary of file names mapped to content or SymLink."""
         for fname in files:
             path = os.path.join(dir_path, ROOT_SUBDIR, fname)
             dirname = os.path.dirname(path)
             if not os.path.isdir(dirname):
                 os.makedirs(dirname)
-            with open(path, 'w') as f:
-                f.write(files[fname])
+            val = files[fname]
+            if isinstance(val, SymLink):
+                linkto = val.linkto
+                if val.abspath:
+                    linkto =  os.path.join(self.root_dir, ROOT_SUBDIR, linkto)
+                os.symlink(linkto, path)
+            else:
+                with open(path, 'w') as f:
+                    f.write(val)
 
     def add_etc_files(self, files):
         self.add_files(files, self.root_dir)
@@ -80,9 +90,6 @@ class Command():
 
     def remove_etc_file(self, fname):
         os.unlink(self.etc_abspath(fname))
-
-    def symlink_etc_file(self, src, dst):
-        os.symlink(*(self.etc_abspath(f) for f in (src, dst)))
 
     def run(self, command, *args, with_rootdir=True):
         argv = ['etcmaint', command]
@@ -129,6 +136,7 @@ class CommandLineTestCase(BaseTestCase):
     def test_cl_pacman_conf(self):
         # Check that CacheDir may be parsed in /etc/pacman.conf.
         emt = EtcMaint()
+        emt.root_dir = '/'
         emt.cache_dir = None
         emt.init()
         self.assertEqual(os.path.isdir(emt.cache_dir), True)
@@ -205,6 +213,22 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'], ['etc', 'master'])
         self.check_content('etc', 'a', 'content')
+
+    def test_create_symlink_abspath(self):
+        files = {'a': 'content', 'b': SymLink('a', True)}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a', 'b'])
+        self.check_content('etc', 'b', self.cmd.etc_abspath('a'))
+
+    def test_create_symlink_relpath(self):
+        files = {'a': 'content', 'b': SymLink('a', False)}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a', 'b'])
+        self.check_content('etc', 'b', 'a')
 
     def test_create_package_and_etc_differ(self):
         # 'b' in /etc and package differ and is added to the master branch.
@@ -364,7 +388,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_results(['a'], ['a', 'b'])
 
         self.cmd.remove_etc_file('a')
-        self.cmd.symlink_etc_file('b', 'a')
+        self.cmd.add_etc_files({'a': SymLink('b', True)})
         self.run_cmd('update')
         self.check_results(['a'], ['a', 'b'])
         self.check_content('etc', 'a', 'package content')

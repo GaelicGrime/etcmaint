@@ -36,9 +36,9 @@ __version__ = '0.1'
 pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
-EXCLUDE_FILES = 'passwd, group, udev/hwdb.bin'
+EXCLUDE_FILES = 'passwd, group, mtab, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
-EXCLUDE_PREFIXES = 'ca-certificates, fonts, ssl/certs'
+EXCLUDE_PREFIXES = 'ca-certificates, ssl/certs'
 
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
@@ -101,7 +101,11 @@ def copy_file(rpath, rootdir, repodir, repo_file=None):
     if dirname and not os.path.isdir(dirname):
         os.makedirs(dirname)
     etc_file = os.path.join(rootdir, rpath)
-    if os.path.islink(etc_file):
+    # Remove destination if source is a symlink or if destination is a symlink
+    # (in the last case, source would be copied to the file pointed by
+    # destination instead of having the symlink itself being copied).
+    if os.path.lexists(repo_file) and (os.path.islink(etc_file) or
+                                       os.path.islink(repo_file)):
         os.remove(repo_file)
     shutil.copy(etc_file, repo_file, follow_symlinks=False)
 
@@ -135,9 +139,10 @@ def threadsafe_makedirs():
         os.makedirs = saved_makedirs
 
 class EtcPath():
-    def __init__(self, *parts):
+    def __init__(self, root_dir, *parts):
         assert len(parts) >= 2
         assert parts[-1].startswith(ROOT_SUBDIR)
+        self.root_dir = root_dir
         self.parts = parts
         self.path = pathlib.Path(*parts)
         self._digest = None
@@ -151,16 +156,21 @@ class EtcPath():
                 self._digest = b''
             else:
                 if is_symlink:
-                    rootdir = os.path.join(*self.parts[:-1])
-                    # The digest is the relative part of the canonical path of
-                    # the file linked by the symlink.
+                    # The digest is the path to which the symbolic link
+                    # points.
                     realpath = self.path.resolve()
+                    basedir = pathlib.Path(*self.parts[:-1])
                     try:
-                        self._digest = realpath.relative_to(rootdir)
+                        # The symlink is a relative path.
+                        self._digest = realpath.relative_to(basedir)
                     except ValueError:
-                        warn('%s links to %s which is not prefixed with %s' %
-                             (self.path, realpath, rootdir))
-                        self._digest = b''
+                        try:
+                            # The symlink is an absolute path.
+                            self._digest = realpath.relative_to(self.root_dir)
+                        except ValueError:
+                            warn('%s links to %s not prefixed with %s' %
+                                 (self.path, realpath, self.root_dir))
+                            self._digest = realpath
                 else:
                     try:
                         h = hashlib.sha1()
@@ -178,7 +188,8 @@ class EtcPath():
 class GitRepo():
     """A git repository."""
 
-    def __init__(self, repodir, verbose):
+    def __init__(self, root_dir, repodir, verbose):
+        self.root_dir = root_dir
         self.repodir = repodir.rstrip(os.sep)
         self.verbose = verbose
         self.curbranch = None
@@ -294,7 +305,7 @@ class GitRepo():
                 continue
             if not fname.startswith(ROOT_SUBDIR):
                 continue
-            d[fname] = EtcPath(self.repodir, fname)
+            d[fname] = EtcPath(self.root_dir, self.repodir, fname)
         return d
 
     @property
@@ -393,7 +404,7 @@ class EtcMaint():
     def init(self):
         if not hasattr(self, 'verbose'):
             self.verbose = False
-        self.repo = GitRepo(self.repodir, self.verbose)
+        self.repo = GitRepo(self.root_dir, self.repodir, self.verbose)
 
         if not hasattr(self, 'dry_run'):
             self.dry_run = False
@@ -519,16 +530,16 @@ class EtcMaint():
         for rpath in (f for f in res.splitlines() if
                       f not in self.exclude_files):
             etc_file = os.path.join(self.root_dir, rpath)
-            if not os.path.isfile(etc_file):
+            if not os.path.lexists(etc_file):
                 warn('%s not synced, does not exist on /etc' % rpath)
                 continue
             if not self.dry_run:
                 path = os.path.join(self.repodir, rpath)
                 try:
-                    if not os.path.islink(etc_file):
-                        stat = os.stat(etc_file)
-                    else:
+                    if os.path.islink(path) or os.path.islink(etc_file):
                         os.remove(etc_file)
+                    else:
+                        stat = os.stat(etc_file)
                     try:
                         shutil.copy(path, etc_file, follow_symlinks=False)
                     except OSError as e:
@@ -666,7 +677,7 @@ class EtcMaint():
         etc_tracked = self.repo.tracked_files('etc-tmp', exclude=exclude)
         for fname in etc_tracked:
             etc_file = os.path.join(self.root_dir, fname)
-            if not os.path.isfile(etc_file):
+            if not os.path.lexists(etc_file):
                 rslt.etc_removed.append(fname)
 
         # Remove the etc-tmp files that do not exist in /etc.
@@ -690,7 +701,7 @@ class EtcMaint():
         """Update master-tmp with the user changes."""
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = {n: EtcPath(self.root_dir, n) for n in
+        etc_files = {n: EtcPath(self.root_dir, self.root_dir, n) for n in
                      list_rpaths(self.root_dir, ROOT_SUBDIR,
                                  suffixes=suffixes)}
         etc_tracked = self.repo.tracked_files('etc-tmp')
@@ -752,7 +763,7 @@ class EtcMaint():
             self.repo.checkout('master-tmp')
             for fname in rslt.pkg_add_master:
                 repo_file = os.path.join(self.repodir, fname)
-                if os.path.isfile(repo_file):
+                if os.path.lexists(repo_file):
                     warn('adding %s to the master-tmp branch but this file'
                          ' already exists' % fname)
                 copy_file(fname, self.root_dir, self.repodir,
@@ -797,7 +808,8 @@ class EtcMaint():
         def etc_files_filter(members):
             for tinfo in members:
                 fname = tinfo.name
-                if (tinfo.isfile() and fname.startswith(ROOT_SUBDIR) and
+                if (fname.startswith(ROOT_SUBDIR) and
+                        (tinfo.isfile() or tinfo.issym() or tinfo.islnk()) and
                         fname not in self.exclude_files):
                     yield tinfo
 
@@ -805,7 +817,7 @@ class EtcMaint():
             tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
             tarinfos = list(etc_files_filter(tar.getmembers()))
             for tinfo in tarinfos:
-                path = EtcPath(self.repodir, tinfo.name)
+                path = EtcPath(self.root_dir, self.repodir, tinfo.name)
                 # Remember the sha1 of the existing file, if it exists, before
                 # extracting it from the tarball.
                 digest = path.digest
@@ -830,7 +842,7 @@ class EtcMaint():
                 # Ensure that the file can be overwritten on a next
                 # 'update' command.
                 path = os.path.join(self.repodir, fname)
-                mode = os.stat(path).st_mode
+                mode = os.lstat(path).st_mode
                 if mode & RW_ACCESS != RW_ACCESS:
                     os.chmod(path, mode | RW_ACCESS)
         return extracted
@@ -866,8 +878,8 @@ class EtcMaint():
 
         rslt = self.results
         for fname in extracted:
-            repo_path = EtcPath(self.repodir, fname)
-            etc_path = EtcPath(self.root_dir, fname)
+            repo_path = EtcPath(self.root_dir, self.repodir, fname)
+            etc_path = EtcPath(self.root_dir, self.root_dir, fname)
             if etc_path.digest == b'':
                 warn('skip %s: not readable' % fname)
                 continue
