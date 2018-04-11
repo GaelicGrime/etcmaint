@@ -400,6 +400,26 @@ class UpdateSyncTestCase(CommandsTestCase):
             self.check_results([], ['a', 'b'], ['etc', 'master'])
             self.check_content('etc', 'b', 'b content')
 
+    def test_update_st_ctime_timestamp(self):
+        # Check that the package st_ctime is used.
+        files = {'a': 'a content'}
+        self.cmd.add_etc_files(files)
+        pkg_a = self.cmd.add_package('package_a', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_content('etc', 'a', 'a content')
+
+        files = {'b': 'b content'}
+        self.cmd.add_etc_files(files)
+        pkg_b = self.cmd.add_package('package_b', files)
+        os.utime(pkg_b, (0, 0))
+        with self.check_output(self.stdout,
+                is_in='scanned %s' % os.path.basename(pkg_b),
+                is_notin='scanned %s' % os.path.basename(pkg_a)):
+            self.run_cmd('update')
+            self.check_results([], ['a', 'b'], ['etc', 'master'])
+            self.check_content('etc', 'b', 'b content')
+
     def test_update_dry_run(self):
         # Check that two consecutive updates in dry-run mode give the same
         # output.

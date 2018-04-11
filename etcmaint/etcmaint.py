@@ -742,7 +742,9 @@ class EtcMaint():
         self.repo.checkout('master-tmp')
         for fname in etc_files:
             if fname in master_tracked and fname not in rslt.pkg_add_master:
-                if etc_files[fname] != master_tracked[fname]:
+                if etc_files[fname].digest == b'':
+                    warn('cannot read %s' % etc_files[fname].path)
+                elif etc_files[fname] != master_tracked[fname]:
                     rslt.user_updated.append(fname)
 
         for files, commit_msg in (
@@ -797,7 +799,16 @@ class EtcMaint():
                     pkg_name = pkg.name
                     if not pkg_name.endswith('.pkg.tar.xz'):
                         continue
-                    if pkg.stat().st_mtime <= timestamp:
+                    # We use st_ctime for the following reasons:
+                    # * When downloading a package, pacman sets its access and
+                    #   last modification time to the modification time of the
+                    #   remote (see curl_download_internal() and utimes_long()
+                    #   at git://projects.archlinux.org/pacman.git).
+                    # * GNU libc documentation explains that "The attribute
+                    #   modification time for the file is set to the current
+                    #   time [by utime()] (since changing the time stamps is
+                    #   itself a modification of the file attributes)".
+                    if pkg.stat().st_ctime <= timestamp:
                         continue
 
                     # Exclude packages.
