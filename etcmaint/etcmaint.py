@@ -191,7 +191,17 @@ class GitRepo():
         self.verbose = verbose
         self.curbranch = None
         self.initial_branch = None
-        self.git = ('git -C %s' % repodir).split()
+
+        # When run with sudo, for example with the 'sync' command, force all
+        # git commands to be run as the user who invoked sudo to avoid having
+        # some files created by 'git checkout some_branch' with root ownership
+        # when run as root, that cannot be unlinked later when checking out
+        # another branch as the plain user.
+        self.git = []
+        sudo_uid = os.environ.get('SUDO_UID')
+        if os.getuid() == 0 and sudo_uid is not None:
+            self.git.extend(('sudo --user #%s' % sudo_uid).split())
+        self.git.extend(('git -C %s' % repodir).split())
 
     def create(self):
         """Create the git repository."""
