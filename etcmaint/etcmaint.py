@@ -1,14 +1,5 @@
 #! /bin/env python
-"""An Arch Linux tool that uses git for the maintenance of /etc files.
-
-The /etc files installed or upgraded by Arch Linux packages are managed in the
-``etc`` branch of a git repository. The /etc files customized or created by
-the user are managed in the ``master`` branch. The upgraded package changes of
-the user-customized files are merged (actually cherry-picked) with the
-``update`` subcommand. Merge conflicts must be resolved and commited by the
-user. After a merge, the ``sync`` subcommand is used to retrofit the merged
-changes to /etc.
-"""
+"""An Arch Linux tool based on git for the maintenance of /etc files."""
 
 import sys
 import os
@@ -29,7 +20,7 @@ from textwrap import dedent, wrap
 from subprocess import PIPE, STDOUT, CalledProcessError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = '0.1'
+__version__ = '0.2'
 pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
@@ -109,7 +100,7 @@ def copy_file(rpath, rootdir, repodir, repo_file=None):
 def str_file_list(header, files):
     if files:
         lines = [header]
-        lines.extend('  %s' % f for f in files)
+        lines.extend('  %s' % f for f in sorted(files))
         return '\n'.join(lines)
 
 @contextlib.contextmanager
@@ -141,7 +132,7 @@ class EtcPath():
         assert parts[-1].startswith(ROOT_SUBDIR)
         self.root_dir = root_dir
         self.parts = parts
-        self.path = pathlib.Path(*parts)
+        self.path = pathlib.PosixPath(*parts)
         self._digest = None
 
     @property
@@ -156,7 +147,7 @@ class EtcPath():
                     # The digest is the path to which the symbolic link
                     # points.
                     realpath = self.path.resolve()
-                    basedir = pathlib.Path(*self.parts[:-1])
+                    basedir = pathlib.PosixPath(*self.parts[:-1])
                     try:
                         # The symlink is a relative path.
                         self._digest = realpath.relative_to(basedir)
@@ -254,12 +245,9 @@ class GitRepo():
     def git_cmd(self, cmd):
         if type(cmd) == str:
             cmd = cmd.split()
-        try:
-            output = subprocess.check_output(self.git + cmd,
+        output = subprocess.check_output(self.git + cmd,
                                     universal_newlines=True, stderr=STDOUT)
-        except CalledProcessError as e:
-            output = str(e) + '\n' + e.output.strip()
-            raise EmtError(output)
+
         output = output.strip()
         if self.verbose and output:
             print(output)
@@ -285,34 +273,41 @@ class GitRepo():
         # For example on an archlinux box:
         #   find /etc | wc -c   ->    57722
         #   getconf ARG_MAX'    ->  2097152
-        self.git_cmd('add %s' % ' '.join(files))
+        self.git_cmd(['add'] + files)
         self.git_cmd(['commit', '-m', msg])
 
     def remove(self, files, msg):
         self.git_cmd('rm %s' % ' '.join(files))
         self.git_cmd(['commit', '-m', msg])
 
-    def add_file(self, fname, content, commit_msg):
-        path = os.path.join(self.repodir, fname)
-        with open(path, 'w') as f:
-            f.write(dedent(content))
-        self.commit([path], commit_msg)
+    def add_files(self, files, commit_msg):
+        paths = []
+        for fname in files:
+            path = os.path.join(self.repodir, fname)
+            paths.append(path)
+            with open(path, 'w') as f:
+                f.write(files[fname])
+        if paths:
+            self.commit(paths, commit_msg)
 
     def cherry_pick(self, commit):
         return subprocess.run(self.git + ['cherry-pick', '-x', commit],
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
 
-    def tracked_files(self, branch, exclude=None):
+    def tracked_files(self, branch):
         """A dictionary of the tracked files in this branch."""
         d = {}
         ls_tree = self.git_cmd('ls-tree -r --name-only --full-tree %s' %
                                branch)
         for fname in ls_tree.splitlines():
-            if exclude and fname in exclude:
+            if fname == '.gitignore':
                 continue
-            if not fname.startswith(ROOT_SUBDIR):
-                continue
-            d[fname] = EtcPath(self.root_dir, self.repodir, fname)
+            if branch.startswith('timestamps'):
+                d[fname] = pathlib.PosixPath(self.repodir, fname)
+            else:
+                if not fname.startswith(ROOT_SUBDIR):
+                    continue
+                d[fname] = EtcPath(self.root_dir, self.repodir, fname)
         return d
 
     @property
@@ -320,92 +315,51 @@ class GitRepo():
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
         return branches.splitlines()
 
-class Timestamp():
-    def __init__(self, emt):
-        self.emt = emt
-        self.fname = '.etcmaint_timestamp'
-        self.path = os.path.join(emt.repodir, self.fname)
-
-    def new(self):
-        """Create the timestamp file."""
-        content = """\
-            # This file is created by etcmaint. Its purpose is to record the
-            # time the etc-tmp branch has been created and the time the etc
-            # branch has been fast-forwarded to the etc-tmp branch.
-            CREATE=0
-            FAST-FORWARD=0
-        """
-        self.emt.repo.add_file(self.fname, content, 'Add the timestamp')
-
-    def abort_corrupted(self):
-        raise EmtError("the '%s' timestamp file is corrupted" % self.fname)
-
-    def set(self, prefix, time=None):
-        """Set the timestamp."""
-        time = _time() if time is None else time
-        prefix_found = False
-        with open(self.path, 'r') as f:
-            lines = []
-            for line in f:
-                if line.startswith(prefix):
-                    prefix_found = True
-                    line = '%s=%s\n' % (prefix, time)
-                lines.append(line)
-        if not prefix_found:
-            self.abort_corrupted()
-        content = ''.join(lines)
-        self.emt.repo.add_file(self.fname, content,
-                                  'Set the %s timestamp' % prefix)
-
-    def value(self, prefix):
-        with open(self.path, 'r') as f:
-            for line in f:
-                if line.startswith(prefix):
-                    return float(line[line.index('=')+1:])
-        self.abort_corrupted()
-
 class UpdateResults():
     def __init__(self):
+        self.new_packages = []
         self.etc_removed = []
         self.user_added = []
         self.user_updated = []
         self.pkg_add_etc = []
         self.pkg_add_master = []
         self.cherry_pick = []
-        self.result = ''
-        self.btype = ''
+        self.branch_type = ''
 
-    def add_list(self, files, header):
+    def add_list(self, result, files, header):
         lines = str_file_list(header, files)
         if lines:
-            if self.result:
-                self.result += '\n'
-            self.result += lines
+            if result:
+                result += '\n'
+            result += lines
+        return result
 
     def __str__(self):
-        btype = self.btype
-        self.add_list(self.etc_removed,
+        branch_type = self.branch_type
+        result = ''
+        result = self.add_list(result, self.new_packages,
+         "List of the new packages:")
+        result = self.add_list(result, self.etc_removed,
          "List of files missing in /etc and removed from both branches:")
-        self.add_list(self.user_added,
-         f"List of files added to the 'master{btype}' branch:")
-        self.add_list(self.user_updated,
-         f"List of files updated in the 'master{btype}' branch:")
-        self.add_list(self.pkg_add_etc,
+        result = self.add_list(result, self.user_added,
+         f"List of files added to the 'master{branch_type}' branch:")
+        result = self.add_list(result, self.user_updated,
+         f"List of files updated in the 'master{branch_type}' branch:")
+        result = self.add_list(result, self.pkg_add_etc,
          f"List of files extracted from a package and added to the"
-             f" 'etc{btype}' branch:")
-        self.add_list(self.pkg_add_master,
+             f" 'etc{branch_type}' branch:")
+        result = self.add_list(result, self.pkg_add_master,
          f"List of files extracted from a package and added to the"
-             f" 'master{btype}' branch:")
-        self.add_list(self.cherry_pick,
+             f" 'master{branch_type}' branch:")
+        result = self.add_list(result, self.cherry_pick,
          'List of files to sync to /etc:')
-        return self.result
+        return result
 
 class EtcMaint():
     """Provide methods to implement the commands."""
 
     def __init__(self):
         self.repodir = repository_dir()
-        self.timestamp = Timestamp(self)
         self.results = UpdateResults()
 
     def init(self):
@@ -435,7 +389,7 @@ class EtcMaint():
             self.repo.close()
 
     def cmd_create(self):
-        """Create the git repository.
+        """Create the git repository and populate the etc and master branches.
 
         The git repository is located at $XDG_DATA_HOME/etcmaint if the
         XDG_DATA_HOME environment variable is set and at
@@ -450,14 +404,11 @@ class EtcMaint():
         self.repo.create()
 
         # Add .gitignore.
-        gitignore = """\
-            *.swp
-        """
-        self.repo.add_file('.gitignore', gitignore, FIRST_COMMIT_MSG)
+        self.repo.add_files({'.gitignore': '.swp\n'}, FIRST_COMMIT_MSG)
 
-        # Create the etc branch and the timestamp.
+        # Create the etc and timestamps branches.
         self.repo.checkout('etc', create=True)
-        self.timestamp.new()
+        self.repo.checkout('timestamps', create=True)
 
         self.repo.checkout('master')
         self.repo.init()
@@ -493,9 +444,9 @@ class EtcMaint():
         return res
 
     def cmd_diff(self):
-        """Print the list of /etc file names not tracked in the 'etc' branch.
+        """Print the list of the /etc files not tracked in the etc branch.
 
-        These are the /etc files not created from an Arch Linux package. Among
+        These are the /etc files not extracted from an Arch Linux package. Among
         them and of interest are the files created by a user that one may want
         to manually add and commit to the 'master' branch of the etcmaint
         repository so that their changes start being tracked by etcmaint (for
@@ -519,7 +470,7 @@ class EtcMaint():
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
 
     def cmd_sync(self):
-        """Synchronize /etc with the changes made in the last merge.
+        """Synchronize /etc with the changes made by the update command.
 
         This command must be run with sudo or as root when using the
         --root-dir default value.
@@ -574,17 +525,13 @@ class EtcMaint():
             print(rpath)
 
         if not self.dry_run:
-            # Remove the temporary branches and update the timestamp to the
-            # time of the etc-tmp branch creation.
-            self.repo.checkout('etc-tmp')
-            time = self.timestamp.value('CREATE')
-            self.fast_forward(time)
+            self.fast_forward()
         return "%s'sync' command terminated"
 
     def create_tmp_branches(self):
-        print('Create the master-tmp and etc-tmp branches')
+        print('Create the temporary branches')
         branches = self.repo.branches
-        for branch in ('etc', 'master'):
+        for branch in ('etc', 'master', 'timestamps'):
             tmp_branch = '%s-tmp' % branch
             if tmp_branch in branches:
                 self.repo.checkout('master')
@@ -592,29 +539,23 @@ class EtcMaint():
                 print("Remove the previous unused '%s' branch" % tmp_branch)
             self.repo.checkout(branch)
             self.repo.checkout(tmp_branch, create=True)
-            if tmp_branch == 'etc-tmp':
-                self.timestamp.set('CREATE')
 
-    def remove_tmp_branches(self, fast_forward=False):
-        if not 'master-tmp' in self.repo.branches:
-            return False
+    def remove_tmp_branches(self):
+        """Delete tmp branches, but merge first if not dry run."""
+        if 'master-tmp' in self.repo.branches:
+            print('Remove the temporary branches')
+            if self.repo.curbranch in ('master-tmp', 'etc-tmp',
+                                       'timestamps-tmp'):
+                self.repo.checkout('master')
+            for branch in ('master', 'etc', 'timestamps'):
+                tmp_branch = '%s-tmp' % branch
+                if not self.dry_run:
+                    self.repo.checkout(branch)
+                    self.repo.git_cmd('merge %s' % tmp_branch)
+                self.repo.git_cmd('branch -D %s' % tmp_branch)
 
-        print('Remove the master-tmp and etc-tmp branches')
-        if self.repo.curbranch in ('master-tmp', 'etc-tmp'):
-            self.repo.checkout('master')
-        for branch in ('master', 'etc'):
-            tmp_branch = '%s-tmp' % branch
-            if fast_forward:
-                self.repo.checkout(branch)
-                self.repo.git_cmd('merge %s' % tmp_branch)
-            self.repo.git_cmd('branch -D %s' % tmp_branch)
-        return True
-
-    def fast_forward(self, time=None):
-        if self.remove_tmp_branches(fast_forward=True):
-            print('Update the timestamp')
-            self.repo.checkout('etc')
-            self.timestamp.set('FAST-FORWARD', time=time)
+    def fast_forward(self):
+        self.remove_tmp_branches()
 
     def update_repository(self):
         self.create_tmp_branches()
@@ -629,10 +570,7 @@ class EtcMaint():
                 self.remove_tmp_branches()
             return res
         else:
-            if self.dry_run:
-                self.remove_tmp_branches()
-            else:
-                self.fast_forward()
+            self.fast_forward()
 
     def git_cherry_pick(self, commit):
         self.repo.checkout('master-tmp')
@@ -642,7 +580,7 @@ class EtcMaint():
                 warn('cherry picking %s to the master-tmp branch but this'
                      ' file does not exist' % fname)
 
-        self.results.btype = '-tmp'
+        self.results.branch_type = '-tmp'
         msg = '%s\n' % self.results
 
         # Use a temporary branch for the cherry-pick.
@@ -696,8 +634,7 @@ class EtcMaint():
         """Remove files that do not exist in /etc."""
 
         rslt = self.results
-        exclude=['.gitignore', self.timestamp.fname]
-        etc_tracked = self.repo.tracked_files('etc-tmp', exclude=exclude)
+        etc_tracked = self.repo.tracked_files('etc-tmp')
         for fname in etc_tracked:
             etc_file = os.path.join(self.root_dir, fname)
             if not os.path.lexists(etc_file):
@@ -799,45 +736,69 @@ class EtcMaint():
         return cherry_pick_commit
 
     def new_packages(self, cache_dir):
-        """Return the packages newer than the timestamp."""
-        timestamp = self.timestamp.value('FAST-FORWARD')
+        """Build the list of new package files."""
+        def newer_exists_in(packages, name, st_mtime, read_content=True):
+            if name in packages:
+                if read_content:
+                    # A 'tracked' timestamps file.
+                    with packages[name].open() as f:
+                        timestamp = f.read()
+                else:
+                    # A 'new_packages' file.
+                    timestamp = packages[name].stat().st_mtime
+                return float(st_mtime) <= float(timestamp)
+            return False
+
         exclude_pkgs_len = len(self.exclude_pkgs)
-        packages = {}
-        for root, *remain in os.walk(cache_dir):
-            with os.scandir(root) as it:
-                for pkg in it:
-                    pkg_name = pkg.name
-                    if not pkg_name.endswith('.pkg.tar.xz'):
-                        continue
-                    # We use st_ctime for the following reasons:
-                    # * When downloading a package, pacman sets its access and
-                    #   last modification time to the modification time of the
-                    #   remote (see curl_download_internal() and utimes_long()
-                    #   at git://projects.archlinux.org/pacman.git).
-                    # * GNU libc documentation explains that "The attribute
-                    #   modification time for the file is set to the current
-                    #   time [by utime()] (since changing the time stamps is
-                    #   itself a modification of the file attributes)".
-                    if pkg.stat().st_ctime <= timestamp:
-                        continue
+        excluded = []
+        # 'timestamps' and 'tracked:'
+        # Dictionary {package name: PosixPath with timestamp as content}
+        timestamps = {}
+        tracked = self.repo.tracked_files('timestamps-tmp')
+        # Dictionary {package name: PosixPath of *.pkg.tar.xz pacman file}
+        new_pkgs = {}
+        self.repo.checkout('timestamps-tmp')
+        with os.scandir(cache_dir) as it:
+            for direntry in it:
+                if not direntry.is_file():
+                    continue
 
-                    # Exclude packages.
-                    if (len(list(itertools.takewhile(lambda x: not x or not
-                            pkg_name.startswith(x), self.exclude_pkgs))) !=
-                                exclude_pkgs_len):
-                        continue
+                fullname = direntry.name
+                if not fullname.endswith('.pkg.tar.xz'):
+                    continue
 
-                    name, *remain = pkg_name.rsplit('-', maxsplit=3)
-                    if len(remain) != 3:
-                        warn('ignoring incorrect package name: %s' % pkg_name)
-                        continue
-                    if name not in packages:
-                        packages[name] = pkg
-                    elif packages[name].name < pkg_name:
-                        packages[name] = pkg
-            if cache_dir == self.cache_dir:
-                break
-        return packages.values()
+                name, *remain = fullname.rsplit('-', maxsplit=3)
+                if len(remain) != 3:
+                    warn('ignoring incorrect package name: %s' % fullname)
+                    continue
+
+                st_mtime = direntry.stat().st_mtime
+                if (newer_exists_in(tracked, name, st_mtime) or
+                        newer_exists_in(new_pkgs, name, st_mtime, False)):
+                    continue
+
+                # Exclude packages.
+                if (name in excluded or
+                        len(list(itertools.takewhile(lambda x: not x or
+                            not name.startswith(x),
+                            self.exclude_pkgs))) != exclude_pkgs_len):
+                    if name not in excluded:
+                        excluded.append(name)
+                    continue
+
+                timestamps[name] = str(st_mtime)
+                new_pkgs[name] = pathlib.PosixPath(direntry.path)
+
+        # Commit the new timestamps.
+        if timestamps:
+            # Add files to the timestamps-tmp branch whose name are the
+            # package name and whose content are the modification time.
+            self.repo.add_files(timestamps,
+                                'Add the timestamps of the new packages')
+            self.results.new_packages = list(pkg.name for pkg in
+                                             new_pkgs.values())
+
+        return new_pkgs.values()
 
     def scan(self, packages, tracked):
         def etc_files_filter(members):
@@ -849,7 +810,7 @@ class EtcMaint():
                     yield tinfo
 
         def extract_from(pkg):
-            tar = tarfile.open(pkg.path, mode='r:xz', debug=1)
+            tar = tarfile.open(str(pkg), mode='r:xz', debug=1)
             tarinfos = list(etc_files_filter(tar.getmembers()))
             for tinfo in tarinfos:
                 path = EtcPath(self.root_dir, self.repodir, tinfo.name)
@@ -887,7 +848,7 @@ class EtcMaint():
 
         Algorithm:
         ----------
-        Build the list of package files newer than the timestamp.
+        Build the list of new package files.
         For each etc file in a package file:
           if the packaged file does not exist in etc-tmp    # pkg install
             add it to the etc-tmp branch
@@ -908,11 +869,11 @@ class EtcMaint():
         # Extract the etc files from each package into the etc-tmp branch.
         master_tracked = self.repo.tracked_files('master-tmp')
         etc_tracked = self.repo.tracked_files('etc-tmp')
-        self.repo.checkout('etc-tmp')
         packages = self.new_packages(self.cache_dir)
         if self.aur_dir is not None:
             packages = itertools.chain(packages,
                                        self.new_packages(self.aur_dir))
+        self.repo.checkout('etc-tmp')
         extracted = self.scan(packages, etc_tracked)
 
         rslt = self.results
@@ -978,6 +939,7 @@ def parse_args(argv, namespace):
                     description=__doc__, add_help=False)
     main_parser.add_argument('--version', '-v', action='version',
                     version='%(prog)s ' + __version__)
+    main_parser.prog = 'etcmaint'
 
     # The help subparser handles the help for each command.
     subparsers = main_parser.add_subparsers(title='etcmaint subcommands')

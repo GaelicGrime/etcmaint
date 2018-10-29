@@ -1,4 +1,4 @@
-"""Test etcmaint."""
+"""etcmaint tests."""
 
 import sys
 import os
@@ -21,6 +21,11 @@ CACHE_DIR = 'cache'
 AUR_DIR = 'aur'
 ROOT_SUBDIR_LEN = len(ROOT_SUBDIR)
 
+# Set debug to True and:
+#   * Print on stderr the stdout and stderr output of etcmaint.
+#   * Do not remove the temporary directories where the tests are run.
+debug = 0
+
 @contextmanager
 def temp_cwd():
     """Context manager that temporarily creates and changes the CWD."""
@@ -29,13 +34,17 @@ def temp_cwd():
             yield cwd_dir
 
 @contextmanager
-def captured_output(name):
-    orig_stream = getattr(sys, name)
-    setattr(sys, name, io.StringIO())
+def captured_output():
+    _stdout = getattr(sys, 'stdout')
+    _stderr = getattr(sys, 'stderr')
+    strio = io.StringIO()
+    setattr(sys, 'stdout', strio)
+    setattr(sys, 'stderr', strio)
     try:
-        yield getattr(sys, name), orig_stream
+        yield strio, _stdout, _stderr
     finally:
-        setattr(sys, name, orig_stream)
+        setattr(sys, 'stdout', _stdout)
+        setattr(sys, 'stdout', _stderr)
 
 def raise_context_of_exit(func, *args, **kwds):
     try:
@@ -75,7 +84,7 @@ class Command():
         self.add_files(files, self.root_dir)
 
     def add_package(self, name, files, version='1.0', release='1',
-                    cache_dir=None):
+                    cache_dir=None, delta_mtime=0):
         """Add a package."""
         cache_dir = self.cache_dir if cache_dir is None else cache_dir
         if not os.path.isdir(cache_dir):
@@ -86,6 +95,11 @@ class Command():
             self.add_files(files)
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
+        # Update the package modification and access times.
+        if delta_mtime:
+            st = os.stat(pkg_name)
+            atime = mtime = st.st_mtime + delta_mtime
+            os.utime(pkg_name, (atime, mtime))
         return pkg_name
 
     def etc_abspath(self, fname):
@@ -109,28 +123,32 @@ class BaseTestCase(TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stdout, self._stdout = self.stack.enter_context(
-                                                captured_output('stdout'))
-        self.stderr, self._stderr = self.stack.enter_context(
-                                                captured_output('stderr'))
-        self.tmpdir = self.stack.enter_context(temp_cwd())
+        self.stdout, self._stdout, self._stderr = self.stack.enter_context(
+                                                          captured_output())
+        if not debug:
+            self.tmpdir = self.stack.enter_context(temp_cwd())
+        else:
+            self.tmpdir = tempfile.TemporaryDirectory().name
+            os.makedirs(self.tmpdir)
+            os.chdir(self.tmpdir)
+            print('The temporary test directory %s must be removed manually' %
+                  self.tmpdir, file =self._stderr)
+
         self.cmd = Command(self.tmpdir)
 
     def run_cmd(self, command, *args, with_rootdir=True):
-        self.emt = self.cmd.run(command, *args, with_rootdir=with_rootdir)
+        self.stdout.seek(0)
+        self.stdout.truncate(0)
+        try:
+            self.emt = self.cmd.run(command, *args, with_rootdir=with_rootdir)
+        finally:
+            if debug:
+                out = self.stdout.getvalue()
+                if out:
+                    print(out, file=self._stderr)
 
-    def print_stdout(self):
-        print('\n%s' % self.stdout.getvalue(), file=self._stdout)
-
-    def print_stderr(self):
-        print('\n%s' % self.stderr.getvalue(), file=self._stderr)
-
-    @contextmanager
-    def check_output(self, strio, equal=None, is_in=None, is_notin=None):
-        strio.seek(0)
-        strio.truncate(0)
-        yield
-        out = strio.getvalue()
+    def check_output(self, equal=None, is_in=None, is_notin=None):
+        out = self.stdout.getvalue()
         if equal is not None:
             self.assertEqual(equal, out)
         if is_in is not None:
@@ -160,8 +178,8 @@ class CommandLineTestCase(BaseTestCase):
     def test_cl_main_help(self):
         self.make_base_dirs()
         self.run_cmd('help', with_rootdir=False)
-        self.assertIn('Arch Linux tool that uses git for the maintenance'
-                      ' of /etc files', self.stdout.getvalue())
+        self.assertIn('An Arch Linux tool based on git for the maintenance'
+                      ' of /etc files.', self.stdout.getvalue())
 
     def test_cl_create_help(self):
         self.make_base_dirs()
@@ -218,7 +236,7 @@ class CommandsTestCase(BaseTestCase):
     def add_repo_file(self, branch, fname, content, commit_msg):
         self.emt.repo.checkout(branch)
         os.makedirs(os.path.join(self.tmpdir, REPO_DIR, ROOT_SUBDIR))
-        self.emt.repo.add_file(os.path.join(ROOT_SUBDIR, fname), content,
+        self.emt.repo.add_files({os.path.join(ROOT_SUBDIR, fname): content},
                                commit_msg)
 
 class CreateTestCase(CommandsTestCase):
@@ -227,7 +245,7 @@ class CreateTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
         self.run_cmd('create')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'a', 'content')
 
     def test_create_aur_package(self):
@@ -279,16 +297,27 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'])
 
-    def test_create_package_old_release(self):
-        # Package files with lower release are ignored.
-        files = {'a': 'content'}
-        self.cmd.add_package('package', files, release=1)
-        files['a'] = 'new content'
-        self.cmd.add_package('package', files, release=2)
+    def test_create_newest_package(self):
+        # Check that the newest package file is used.
+        files = {'a': 'newest release X'}
+        self.cmd.add_package('package', files, release='X')
+
+        files['a'] = 'oldest release Y'
         self.cmd.add_etc_files(files)
+        # Create the package in the past.
+        pkg_a = self.cmd.add_package('package', files, release='Y',
+                                     delta_mtime=-3600)
+
         self.run_cmd('create')
-        self.check_results([], ['a'])
-        self.check_content('etc', 'a', 'new content')
+        self.assertNotIn('package-1.0-Y',
+                        ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
+                        p in self.emt.results.new_packages))
+        self.check_results(['a'], ['a'])
+        # The oldest release file is in master: it is the content of the /etc
+        # file which differs from the content of the newest release (and
+        # pacman would have written a pacnew file).
+        self.check_content('master', 'a', 'oldest release Y')
+        self.check_content('etc', 'a', 'newest release X')
 
     def test_create_exclude_packages(self):
         files = {'a': 'a content', 'b': 'b content', 'c': 'c content'}
@@ -306,7 +335,7 @@ class CreateTestCase(CommandsTestCase):
     def test_create_exclude_files(self):
         files = {'a': 'a content', 'b': 'b content', 'bbb': 'bbb content'}
         self.cmd.add_etc_files(files)
-        pkg_a = self.cmd.add_package('package', files)
+        self.cmd.add_package('package', files)
         self.run_cmd('create', '--exclude-files', 'foo, b, bar')
         self.check_results([], ['a', 'bbb'])
 
@@ -316,13 +345,13 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
         self.run_cmd('create')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
         files = {'a': 'new content'}
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
         self.run_cmd('update')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'a', 'new content')
 
     def test_update_etc_removed(self):
@@ -337,7 +366,7 @@ class UpdateSyncTestCase(CommandsTestCase):
 
         self.cmd.remove_etc_file('b')
         self.run_cmd('update')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
     def test_update_package_and_etc_differ_removed(self):
         # Remove 'a' /etc file and it is removed from the etc branch on
@@ -364,11 +393,11 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'])
 
-        with self.check_output(self.stdout, is_notin="List of files extracted"
-                             " from a package and added to the 'etc' branch"):
-            self.cmd.add_package('package', files, release=2)
-            self.run_cmd('update')
-            self.check_results([], ['a'])
+        # Ensure that package 'X' does not have the same st_mtime.
+        self.cmd.add_package('package', files, release='X', delta_mtime=1)
+        self.run_cmd('update')
+        self.check_results([], ['a'])
+        self.assertFalse(self.emt.results.pkg_add_etc)
 
     def test_update_with_new_package(self):
         self.cmd.add_etc_files({'a': 'content'})
@@ -381,44 +410,23 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['a', 'b'])
 
-    def test_update_timestamp(self):
+    def test_update_old_package(self):
         # Check that old packages are not scanned on the next update.
         files = {'a': 'a content'}
         self.cmd.add_etc_files(files)
         pkg_a = self.cmd.add_package('package_a', files)
         self.run_cmd('create')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'a', 'a content')
 
         files = {'b': 'b content'}
         self.cmd.add_etc_files(files)
         pkg_b = self.cmd.add_package('package_b', files)
-        with self.check_output(self.stdout,
-                is_in='scanned %s' % os.path.basename(pkg_b),
-                is_notin='scanned %s' % os.path.basename(pkg_a)):
-            self.run_cmd('update')
-            self.check_results([], ['a', 'b'], ['etc', 'master'])
-            self.check_content('etc', 'b', 'b content')
-
-    def test_update_st_ctime_timestamp(self):
-        # Check that the package st_ctime is used.
-        files = {'a': 'a content'}
-        self.cmd.add_etc_files(files)
-        pkg_a = self.cmd.add_package('package_a', files)
-        self.run_cmd('create')
-        self.check_results([], ['a'], ['etc', 'master'])
-        self.check_content('etc', 'a', 'a content')
-
-        files = {'b': 'b content'}
-        self.cmd.add_etc_files(files)
-        pkg_b = self.cmd.add_package('package_b', files)
-        os.utime(pkg_b, (0, 0))
-        with self.check_output(self.stdout,
-                is_in='scanned %s' % os.path.basename(pkg_b),
-                is_notin='scanned %s' % os.path.basename(pkg_a)):
-            self.run_cmd('update')
-            self.check_results([], ['a', 'b'], ['etc', 'master'])
-            self.check_content('etc', 'b', 'b content')
+        self.run_cmd('update')
+        self.check_results([], ['a', 'b'], ['etc', 'master', 'timestamps'])
+        self.check_content('etc', 'b', 'b content')
+        self.check_output(is_in='scanned %s' % os.path.basename(pkg_b),
+                           is_notin='scanned %s' % os.path.basename(pkg_a))
 
     def test_update_dry_run(self):
         # Check that two consecutive updates in dry-run mode give the same
@@ -509,7 +517,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
         self.run_cmd('update')
         self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                                          'master-tmp'])
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
         self.check_content('master-tmp', 'a', dedent("""\
                                                      user line 0
                                                      line 1
@@ -523,7 +531,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.test_update_merge()
         self.run_cmd('update')
         self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                                          'master-tmp'])
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
         self.check_content('master-tmp', 'a', dedent("""\
                                                      user line 0
                                                      line 1
@@ -543,7 +551,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         package_content = content[:]; package_content[3] = 'package line 3'
         self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
         self.run_cmd('update', '--dry-run')
-        self.check_results(['a'], ['a'], ['etc', 'master'])
+        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
 
     def test_update_plain_conflict(self):
         # A plain conflict: a package upgrades the content of a user
@@ -558,7 +566,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_package('package_a', {'a': 'new package content'})
         self.run_cmd('update')
         self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                                          'master-tmp'])
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
 
@@ -574,15 +582,33 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_package('package_a', {'a': 'new package content'})
         self.run_cmd('update')
         self.check_results([], ['a'], ['etc', 'etc-tmp', 'master',
-                                       'master-tmp'])
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
+
+    def test_update_new_package(self):
+        # Check that a package is updated with a new release.
+        files = {'a': 'initial content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files, release='X')
+        self.run_cmd('create')
+
+        files['a'] = 'new content'
+        self.cmd.add_etc_files(files)
+        pkg_a = self.cmd.add_package('package', files, release='Y',
+                                     delta_mtime=1)
+        self.run_cmd('update')
+        self.assertNotIn('package-1.0-X',
+                        ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
+                        p in self.emt.results.new_packages))
+        self.check_results([], ['a'])
+        self.check_content('etc', 'a', 'new content')
 
     def test_sync(self):
         # Sync after a git merge.
         self.test_update_merge()
         self.run_cmd('sync')
-        self.check_results(['a'], ['a'], ['etc', 'master'])
+        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('master', 'a', dedent("""\
                                                  user line 0
                                                  line 1
@@ -604,7 +630,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.test_update_merge()
         self.run_cmd('sync', '--dry-run')
         self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                                          'master-tmp'])
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
         self.check_content('master-tmp', 'a', dedent("""\
                                                      user line 0
                                                      line 1
@@ -620,12 +646,12 @@ class UpdateSyncTestCase(CommandsTestCase):
         time.sleep(1)
         files = {'b': 'b content'}
         self.cmd.add_etc_files(files)
-        pkg_b = self.cmd.add_package('package_b', files)
+        self.cmd.add_package('package_b', files)
 
         self.run_cmd('sync')
 
         self.run_cmd('update')
-        self.check_results(['a'], ['a', 'b'], ['etc', 'master'])
+        self.check_results(['a'], ['a', 'b'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'b', 'b content')
 
     def test_sync_no_cherry_pick(self):
@@ -633,7 +659,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
         self.run_cmd('create')
-        self.check_results([], ['a'], ['etc', 'master'])
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
         self.emt.repo.checkout('master-tmp', create=True)
         with self.assertRaisesRegex(EmtError,
@@ -646,14 +672,13 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', {'a': 'package content'})
         self.run_cmd('create')
-        self.check_results(['a'], ['a'], ['etc', 'master'])
+        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('master', 'a', 'content of a')
         self.check_content('etc', 'a', 'package content')
 
-        with self.check_output(self.stdout,
-                is_in='\n'.join(os.path.join(ROOT_SUBDIR, x) for
-                x in ['b', 'c'])):
-            self.run_cmd('diff')
+        self.run_cmd('diff')
+        self.check_output(is_in='\n'.join(os.path.join(ROOT_SUBDIR, x)
+                               for x in ['b', 'c']))
 
     def test_diff_exclude_prefixes(self):
         files = {f: 'content of %s' % f for f in
@@ -661,14 +686,13 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', {'a_file': 'package content'})
         self.run_cmd('create')
-        self.check_results(['a_file'], ['a_file'], ['etc', 'master'])
+        self.check_results(['a_file'], ['a_file'], ['etc', 'master', 'timestamps'])
         self.check_content('master', 'a_file', 'content of a_file')
         self.check_content('etc', 'a_file', 'package content')
 
-        with self.check_output(self.stdout,
-                is_in=os.path.join(ROOT_SUBDIR, 'c_file'),
-                is_notin=os.path.join(ROOT_SUBDIR, 'b_file')):
-            self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar')
+        self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar')
+        self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'c_file'),
+                               is_notin=os.path.join(ROOT_SUBDIR, 'b_file'))
 
     def test_diff_use_etc_tmp_no_tmp(self):
         files = {'a': 'content'}
@@ -697,9 +721,8 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_package('package_b', {'b': 'b content'})
         self.run_cmd('update')
         self.check_results([], ['a'], ['etc', 'etc-tmp', 'master',
-                                          'master-tmp'])
-        with self.check_output(self.stdout,
-                is_in=os.path.join(ROOT_SUBDIR, 'b')):
-            self.run_cmd('diff')
-        with self.check_output(self.stdout, equal='\n'):
-            self.run_cmd('diff', '--use-etc-tmp')
+                              'master-tmp', 'timestamps', 'timestamps-tmp'])
+        self.run_cmd('diff')
+        self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'b'))
+        self.run_cmd('diff', '--use-etc-tmp')
+        self.check_output(equal='\n')

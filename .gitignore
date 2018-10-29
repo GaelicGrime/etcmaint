@@ -1,5 +1,4 @@
 *.swp
 *.pyc
-MANIFEST
-dist/
 .coverage
+README.html
