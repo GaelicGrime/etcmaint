@@ -27,6 +27,8 @@ FIRST_COMMIT_MSG = 'First etcmaint commit'
 EXCLUDE_FILES = 'passwd, group, mtab, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
 EXCLUDE_PREFIXES = 'ca-certificates, ssl/certs'
+ETCMAINT_BRANCHES = ['etc', 'etc-tmp', 'master', 'master-tmp', 'timestamps',
+                     'timestamps-tmp']
 
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
@@ -313,7 +315,7 @@ class GitRepo():
     @property
     def branches(self):
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
-        return branches.splitlines()
+        return [b for b in branches.splitlines() if b in ETCMAINT_BRANCHES]
 
 class UpdateResults():
     def __init__(self):
@@ -418,19 +420,29 @@ class EtcMaint():
     def cmd_update(self):
         """Update the repository with packages and user changes.
 
-        The changes are done in temporary branches named 'master-tmp' and
-        'etc-tmp'. When the changes do not incur a merge, the 'master' (resp.
-        'etc') branch is fast-forwarded to its temporary branch and the
-        temporary branches deleted. The operation is complete. Otherwise the
-        fast-forwarding is postponed until the merge is synced to /etc with
-        the 'sync' subcommand and the fast-forwarding is done by this command.
-        Until then it is still possible to start over with a new 'update'
-        subcommand, the previous temporary branches are discarded in that
-        case.
+        The changes are made in temporary branches named 'master-tmp' and
+        'etc-tmp'. When those changes do not incur a cherry-pick, the
+        'master-tmp' (resp.  'etc-tmp') branch is merged as a fast-forward
+        into its main branch and the temporary branches deleted. The operation
+        is then complete and the changes can be examined with the git diff
+        command run on the differences between the git tag set at the previous
+        'update' command, named '<branch name>-prev', and the branch itself.
+        For example, to list the names of the files that have been changed in
+        the master branch:
 
-        When a merge is pending and if packages are being upgraded before the
-        'sync' subcommand, the next 'update' subcommand following the 'sync'
-        subcommand will take those packages into account.
+            git diff --name-only master-prev...master
+
+        Otherwise the fast-forwarding is postponed until the 'sync' command is
+        run and until then it is still possible to start over with a new
+        'update' command, the previous temporary branches being discarded in
+        that case. To examine the changes that will be merged into each branch
+        by the 'sync' command, use the git diff command run on the differences
+        between the branch itself and the corresponding temporary branch. For
+        example, to list all the changes that will be made by the 'sync'
+        command to the master branch:
+
+            git diff master...master-tmp
+
         """
         res = self.update_repository()
         if isinstance(res, str):
@@ -550,6 +562,13 @@ class EtcMaint():
             for branch in ('master', 'etc', 'timestamps'):
                 tmp_branch = '%s-tmp' % branch
                 if not self.dry_run:
+                    if branch in ('master', 'etc'):
+                        # If there is a merge to be done then tag the branch
+                        # before the merge.
+                        if (self.repo.git_cmd('rev-list %s...%s' %
+                                (branch, tmp_branch))):
+                            self.repo.git_cmd('tag -f %s-prev %s' %
+                                              (branch, branch))
                     self.repo.checkout(branch)
                     self.repo.git_cmd('merge %s' % tmp_branch)
                 self.repo.git_cmd('branch -D %s' % tmp_branch)

@@ -12,8 +12,8 @@ from textwrap import dedent
 from collections import namedtuple
 from unittest import mock, TestCase
 
-from etcmaint.etcmaint import (change_cwd, etcmaint, ROOT_SUBDIR, EtcPath,
-                               EmtError, EtcMaint)
+from etcmaint.etcmaint import (ETCMAINT_BRANCHES, change_cwd, etcmaint,
+                               ROOT_SUBDIR, EtcPath, EmtError, EtcMaint)
 
 ROOT_DIR = 'root'
 REPO_DIR = 'repo'
@@ -340,6 +340,28 @@ class CreateTestCase(CommandsTestCase):
         self.check_results([], ['a', 'bbb'])
 
 class UpdateSyncTestCase(CommandsTestCase):
+    def simple_cherry_pick(self):
+        content = ['line %d' % n for n in range(5)]
+        user_content = content[:]; user_content[0] = 'user line 0'
+        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
+        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
+        self.run_cmd('create')
+        self.check_results(['a'], ['a'])
+
+        # A cherry-pick occurs.
+        package_content = content[:]; package_content[3] = 'package line 3'
+        self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
+        self.run_cmd('update')
+
+    def check_simple_cherry_pick(self, branch, branches):
+        self.check_results(['a'], ['a'], branches)
+        self.check_content(branch, 'a', dedent("""\
+                                               user line 0
+                                               line 1
+                                               line 2
+                                               package line 3
+                                               line 4"""))
+
     def test_update_plain(self):
         files = {'a': 'content'}
         self.cmd.add_etc_files(files)
@@ -504,43 +526,20 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_results(['b'], ['a'])
         self.check_content('master', 'b', 'new content')
 
-    def test_update_merge(self):
-        # File merged by git.
-        content = ['line %d' % n for n in range(5)]
-        user_content = content[:]; user_content[0] = 'user line 0'
-        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
-        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
-        self.run_cmd('create')
-        self.check_results(['a'], ['a'])
+    def test_update_cherry_pick(self):
+        # File cherry-picked by git.
+        self.simple_cherry_pick()
+        self.check_simple_cherry_pick('master-tmp', ETCMAINT_BRANCHES)
 
-        package_content = content[:]; package_content[3] = 'package line 3'
-        self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
+    def test_update_cherry_pick_update(self):
+        # Check that an update following an update with a cherry-pick, gives
+        # the same result.
+        self.simple_cherry_pick()
         self.run_cmd('update')
-        self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
-        self.check_content('master-tmp', 'a', dedent("""\
-                                                     user line 0
-                                                     line 1
-                                                     line 2
-                                                     package line 3
-                                                     line 4"""))
+        self.check_simple_cherry_pick('master-tmp', ETCMAINT_BRANCHES)
 
-    def test_update_merge_update(self):
-        # Check that an update following an update with a merge, gives the
-        # same result.
-        self.test_update_merge()
-        self.run_cmd('update')
-        self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
-        self.check_content('master-tmp', 'a', dedent("""\
-                                                     user line 0
-                                                     line 1
-                                                     line 2
-                                                     package line 3
-                                                     line 4"""))
-
-    def test_update_merge_dry_run(self):
-        # File merged by git in dry-run mode: no changes.
+    def test_update_cherry_pick_dry_run(self):
+        # File cherry-picked by git in dry-run mode: no changes.
         content = ['line %d' % n for n in range(5)]
         user_content = content[:]; user_content[0] = 'user line 0'
         self.cmd.add_etc_files({'a': '\n'.join(user_content)})
@@ -565,8 +564,7 @@ class UpdateSyncTestCase(CommandsTestCase):
 
         self.cmd.add_package('package_a', {'a': 'new package content'})
         self.run_cmd('update')
-        self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
+        self.check_results(['a'], ['a'], ETCMAINT_BRANCHES)
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
 
@@ -581,8 +579,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_etc_files({'a': 'new user content'})
         self.cmd.add_package('package_a', {'a': 'new package content'})
         self.run_cmd('update')
-        self.check_results([], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
+        self.check_results([], ['a'], ETCMAINT_BRANCHES)
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
 
@@ -604,44 +601,39 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_results([], ['a'])
         self.check_content('etc', 'a', 'new content')
 
-    def test_sync(self):
-        # Sync after a git merge.
-        self.test_update_merge()
+    def test_plain_sync(self):
+        # Sync after a git cherry-pick.
+        self.simple_cherry_pick()
         self.run_cmd('sync')
-        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
-        self.check_content('master', 'a', dedent("""\
-                                                 user line 0
-                                                 line 1
-                                                 line 2
-                                                 package line 3
-                                                 line 4"""))
+        self.check_simple_cherry_pick('master',
+                                      ['etc', 'master', 'timestamps'])
         fname = os.path.join(ROOT_SUBDIR, 'a')
         self.assertEqual(EtcPath(self.tmpdir, REPO_DIR, fname),
                          EtcPath(self.tmpdir, ROOT_DIR, fname))
 
+    def test_previous_tag(self):
+        # Check the '<branch>-prev' git tag.
+        self.simple_cherry_pick()
+        self.run_cmd('sync')
+        out = self.emt.repo.git_cmd('diff master-prev...master')
+        self.assertIn('-line 3\n+package line 3', out)
+
     def test_sync_unresolved_conflict(self):
-        # Sync after a git merge.
+        # Sync after a git cherry-pick.
         self.test_update_conflict()
         with self.assertRaisesRegex(EmtError, 'repository is not clean'):
             self.run_cmd('sync')
 
     def test_sync_dry_run(self):
-        # Sync after a git merge in dry-run mode.
-        self.test_update_merge()
+        # Sync after a git cherry-pick in dry-run mode.
+        self.simple_cherry_pick()
         self.run_cmd('sync', '--dry-run')
-        self.check_results(['a'], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
-        self.check_content('master-tmp', 'a', dedent("""\
-                                                     user line 0
-                                                     line 1
-                                                     line 2
-                                                     package line 3
-                                                     line 4"""))
+        self.check_simple_cherry_pick('master-tmp', ETCMAINT_BRANCHES)
 
     def test_sync_timestamp(self):
-        # Check that a package added after a merge and before a sync is not
-        # ignored on the next update.
-        self.test_update_merge()
+        # Check that a package added after a cherry-pick and before a sync is
+        # not ignored on the next update.
+        self.simple_cherry_pick()
 
         time.sleep(1)
         files = {'b': 'b content'}
@@ -705,7 +697,7 @@ class DiffTestCase(CommandsTestCase):
                       self.stdout.getvalue())
 
     def test_diff_use_etc_tmp(self):
-        # File merged by git.
+        # File cherry-picked by git.
         content = ['line %d' % n for n in range(5)]
         a_content = '\n'.join(content)
         self.cmd.add_etc_files({'a': a_content})
@@ -720,8 +712,7 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_etc_files({'b': 'b content'})
         self.cmd.add_package('package_b', {'b': 'b content'})
         self.run_cmd('update')
-        self.check_results([], ['a'], ['etc', 'etc-tmp', 'master',
-                              'master-tmp', 'timestamps', 'timestamps-tmp'])
+        self.check_results([], ['a'], ETCMAINT_BRANCHES)
         self.run_cmd('diff')
         self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'b'))
         self.run_cmd('diff', '--use-etc-tmp')
