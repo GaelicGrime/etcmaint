@@ -249,13 +249,14 @@ class CreateTestCase(CommandsTestCase):
         self.check_content('etc', 'a', 'content')
 
     def test_create_aur_package(self):
+        # The AUR package is located in a subdirectory of 'aur-dir'.
         files = {'a': 'content'}
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
         files = {'b': 'content'}
         self.cmd.add_etc_files(files)
         self.cmd.add_package('aur package', files,
-                             cache_dir=os.path.join(self.tmpdir, AUR_DIR))
+                     cache_dir=os.path.join(self.tmpdir, AUR_DIR, 'subdir'))
         self.run_cmd('create', '--aur-dir', AUR_DIR)
         self.check_results([], ['a', 'b'])
 

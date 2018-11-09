@@ -777,36 +777,42 @@ class EtcMaint():
         # Dictionary {package name: PosixPath of *.pkg.tar.xz pacman file}
         new_pkgs = {}
         self.repo.checkout('timestamps-tmp')
-        with os.scandir(cache_dir) as it:
-            for direntry in it:
-                if not direntry.is_file():
-                    continue
 
-                fullname = direntry.name
-                if not fullname.endswith('.pkg.tar.xz'):
-                    continue
+        for root, *remain in os.walk(cache_dir):
+            with os.scandir(root) as it:
+                for direntry in it:
+                    if not direntry.is_file():
+                        continue
 
-                name, *remain = fullname.rsplit('-', maxsplit=3)
-                if len(remain) != 3:
-                    warn('ignoring incorrect package name: %s' % fullname)
-                    continue
+                    fullname = direntry.name
+                    if not fullname.endswith('.pkg.tar.xz'):
+                        continue
 
-                st_mtime = direntry.stat().st_mtime
-                if (newer_exists_in(tracked, name, st_mtime) or
-                        newer_exists_in(new_pkgs, name, st_mtime, False)):
-                    continue
+                    name, *remain = fullname.rsplit('-', maxsplit=3)
+                    if len(remain) != 3:
+                        warn('ignoring incorrect package name: %s' % fullname)
+                        continue
 
-                # Exclude packages.
-                if (name in excluded or
-                        len(list(itertools.takewhile(lambda x: not x or
-                            not name.startswith(x),
-                            self.exclude_pkgs))) != exclude_pkgs_len):
-                    if name not in excluded:
-                        excluded.append(name)
-                    continue
+                    st_mtime = direntry.stat().st_mtime
+                    if (newer_exists_in(tracked, name, st_mtime) or
+                            newer_exists_in(new_pkgs, name, st_mtime, False)):
+                        continue
 
-                timestamps[name] = str(st_mtime)
-                new_pkgs[name] = pathlib.PosixPath(direntry.path)
+                    # Exclude packages.
+                    if (name in excluded or
+                            len(list(itertools.takewhile(lambda x: not x or
+                                not name.startswith(x),
+                                self.exclude_pkgs))) != exclude_pkgs_len):
+                        if name not in excluded:
+                            excluded.append(name)
+                        continue
+
+                    timestamps[name] = str(st_mtime)
+                    new_pkgs[name] = pathlib.PosixPath(direntry.path)
+            # Look the full cache_dir tree only when scanning the 'aur-dir'
+            # directory.
+            if cache_dir != self.aur_dir:
+                break
 
         # Commit the new timestamps.
         if timestamps:
@@ -990,8 +996,8 @@ def parse_args(argv, namespace):
             parser.add_argument('--cache-dir', help='Set pacman cache'
                 ' directory (override the /etc/pacman.conf setting of the'
                 ' CacheDir option)', type=isdir)
-            parser.add_argument('--aur-dir', help='Set the path of the '
-                'directory where to look recursively for built AUR packages',
+            parser.add_argument('--aur-dir', help='Set the path of the root '
+                'of the directory tree where to look for built AUR packages',
                 type=isdir)
             parser.add_argument('--exclude-pkgs', default=EXCLUDE_PKGS,
                 type=lambda x: list(y.strip() for y in x.split(',')),
