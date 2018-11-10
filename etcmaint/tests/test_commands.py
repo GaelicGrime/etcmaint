@@ -391,6 +391,22 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
+    def test_update_master_removed(self):
+        # An /etc file is created by the user and manually commited to master.
+        # Check that it is removed from master after it has been removed from
+        # /etc.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        fname = 'deleted etc file'
+        self.add_repo_file('master', fname, 'content', 'some commit msg')
+        self.run_cmd('update')
+        self.assertIn(os.path.join(ROOT_SUBDIR, fname),
+                                   self.emt.results.master_removed)
+
     def test_update_package_and_etc_differ_removed(self):
         # Remove 'a' /etc file and it is removed from the etc branch on
         # 'update', and removed from the master branch.

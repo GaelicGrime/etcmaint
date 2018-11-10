@@ -279,7 +279,7 @@ class GitRepo():
         self.git_cmd(['commit', '-m', msg])
 
     def remove(self, files, msg):
-        self.git_cmd('rm %s' % ' '.join(files))
+        self.git_cmd(['rm'] + files)
         self.git_cmd(['commit', '-m', msg])
 
     def add_files(self, files, commit_msg):
@@ -321,6 +321,7 @@ class UpdateResults():
     def __init__(self):
         self.new_packages = []
         self.etc_removed = []
+        self.master_removed = []
         self.user_added = []
         self.user_updated = []
         self.pkg_add_etc = []
@@ -342,7 +343,11 @@ class UpdateResults():
         result = self.add_list(result, self.new_packages,
          "List of the new packages:")
         result = self.add_list(result, self.etc_removed,
-         "List of files missing in /etc and removed from both branches:")
+         "List of etc branch files missing in /etc and removed from both"
+         " branches:")
+        result = self.add_list(result, self.master_removed,
+         "List of master branch files missing in /etc and removed from the"
+         " master branch:")
         result = self.add_list(result, self.user_added,
          f"List of files added to the 'master{branch_type}' branch:")
         result = self.add_list(result, self.user_updated,
@@ -580,7 +585,7 @@ class EtcMaint():
         self.create_tmp_branches()
 
         cherry_pick_commit = self.git_upgraded_pkgs()
-        self.git_removed_pkgs()
+        self.git_removed_files()
         self.git_user_updates()
 
         if cherry_pick_commit:
@@ -649,7 +654,7 @@ class EtcMaint():
 
         return msg
 
-    def git_removed_pkgs(self):
+    def git_removed_files(self):
         """Remove files that do not exist in /etc."""
 
         rslt = self.results
@@ -665,13 +670,21 @@ class EtcMaint():
             self.repo.checkout('etc-tmp')
             self.repo.remove(rslt.etc_removed, commit_msg)
 
-        # Remove the master-tmp files that have been removed in the etc-tmp
-        # branch.
         master_remove = []
         master_tracked = self.repo.tracked_files('master-tmp')
+        # Remove the master-tmp files that have been removed from the etc-tmp
+        # branch.
         for fname in rslt.etc_removed:
             if fname in master_tracked:
                 master_remove.append(fname)
+        # Remove the master-tmp files that have been removed from /etc (the
+        # only ones left here are the files that had been manually added to
+        # the master branch by the user).
+        for fname in master_tracked:
+            etc_file = os.path.join(self.root_dir, fname)
+            if not os.path.lexists(etc_file):
+                master_remove.append(fname)
+                rslt.master_removed.append(fname)
         if master_remove:
             self.repo.checkout('master-tmp')
             self.repo.remove(master_remove, commit_msg)
