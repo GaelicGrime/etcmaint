@@ -1,0 +1,19 @@
+before_script:
+    - adduser --disabled-password --gecos '' git_user
+    - su --command='git config --global user.name git_user' git_user
+    - su --command='git config --global user.email git_user@gitlab.com' git_user
+
+unittest:
+    stage: test
+    image: python
+    script:
+        - su --command='python -m unittest -v' git_user
+    only:
+        - pushes
+        - triggers
+    retry:
+        max: 2
+        when:
+            - runner_system_failure
+            - stuck_or_timeout_failure
+
