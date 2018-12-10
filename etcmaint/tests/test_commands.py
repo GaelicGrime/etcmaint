@@ -10,7 +10,7 @@ from argparse import ArgumentError
 from contextlib import contextmanager, ExitStack
 from textwrap import dedent
 from collections import namedtuple
-from unittest import mock, TestCase
+from unittest import mock, TestCase, skipIf
 
 from etcmaint.etcmaint import (ETCMAINT_BRANCHES, change_cwd, etcmaint,
                                ROOT_SUBDIR, EtcPath, EmtError, EtcMaint)
@@ -20,6 +20,7 @@ REPO_DIR = 'repo'
 CACHE_DIR = 'cache'
 AUR_DIR = 'aur'
 ROOT_SUBDIR_LEN = len(ROOT_SUBDIR)
+PACMAN_CONF = '/etc/pacman.conf'
 
 # Set debug to True and:
 #   * Print on stderr the stdout and stderr output of etcmaint.
@@ -56,7 +57,13 @@ def raise_context_of_exit(func, *args, **kwds):
 SymLink = namedtuple('SymLink', ['linkto', 'abspath'])
 
 class Command():
-    """Helper to build an etcmaint command."""
+    """Helper to build an etcmaint command.
+
+    'relative_time' is used to ensure that the modification and access times
+    of packages increment with each addition of a package.
+    """
+
+    relative_time = 0
 
     def __init__(self, tmpdir):
         self.tmpdir = tmpdir
@@ -84,7 +91,7 @@ class Command():
         self.add_files(files, self.root_dir)
 
     def add_package(self, name, files, version='1.0', release='1',
-                    cache_dir=None, delta_mtime=0):
+                    cache_dir=None, delta_mtime=None):
         """Add a package."""
         cache_dir = self.cache_dir if cache_dir is None else cache_dir
         if not os.path.isdir(cache_dir):
@@ -96,6 +103,9 @@ class Command():
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
+        if delta_mtime is None:
+            delta_mtime = Command.relative_time
+            Command.relative_time += 1
         if delta_mtime:
             st = os.stat(pkg_name)
             atime = mtime = st.st_mtime + delta_mtime
@@ -167,6 +177,7 @@ class CommandLineTestCase(BaseTestCase):
         os.makedirs(os.path.join(self.tmpdir, ROOT_DIR, ROOT_SUBDIR))
         os.makedirs(os.path.join(self.tmpdir, CACHE_DIR))
 
+    @skipIf(not os.path.exists(PACMAN_CONF), '%s does not exist' % PACMAN_CONF)
     def test_cl_pacman_conf(self):
         # Check that CacheDir may be parsed in /etc/pacman.conf.
         emt = EtcMaint()
@@ -432,8 +443,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'])
 
-        # Ensure that package 'X' does not have the same st_mtime.
-        self.cmd.add_package('package', files, release='X', delta_mtime=1)
+        self.cmd.add_package('package', files, release='X')
         self.run_cmd('update')
         self.check_results([], ['a'])
         self.assertFalse(self.emt.results.pkg_add_etc)
@@ -609,8 +619,7 @@ class UpdateSyncTestCase(CommandsTestCase):
 
         files['a'] = 'new content'
         self.cmd.add_etc_files(files)
-        pkg_a = self.cmd.add_package('package', files, release='Y',
-                                     delta_mtime=1)
+        pkg_a = self.cmd.add_package('package', files, release='Y')
         self.run_cmd('update')
         self.assertNotIn('package-1.0-X',
                         ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
