@@ -1,12 +1,10 @@
-before_script:
-    - adduser --disabled-password --gecos '' git_user
-    - su --command='git config --global user.name git_user' git_user
-    - su --command='git config --global user.email git_user@gitlab.com' git_user
-
 unittest:
     stage: test
     image: python
     script:
+        - adduser --disabled-password --gecos '' git_user
+        - su --command='git config --global user.name git_user' git_user
+        - su --command='git config --global user.email git_user@gitlab.com' git_user
         - su --command='python -m unittest -v' git_user
     only:
         - pushes
@@ -17,3 +15,15 @@ unittest:
             - runner_system_failure
             - stuck_or_timeout_failure
 
+pages:
+    stage: deploy
+    script:
+        - apt-get update
+        - apt-get -y install python3-sphinx
+        - sphinx-build -b html doc public
+    artifacts:
+        paths:
+            - public
+    only:
+        - tags
+        - triggers

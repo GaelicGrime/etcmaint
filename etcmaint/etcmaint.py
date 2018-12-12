@@ -343,11 +343,11 @@ class UpdateResults():
         result = self.add_list(result, self.new_packages,
          "List of the new packages:")
         result = self.add_list(result, self.etc_removed,
-         "List of etc branch files missing in /etc and removed from both"
-         " branches:")
+         f"List of the files of the 'etc{branch_type}' branch missing in /etc"
+         " and removed from both branches:")
         result = self.add_list(result, self.master_removed,
-         "List of master branch files missing in /etc and removed from the"
-         " master branch:")
+         f"List of the files of the 'master{branch_type}' branch missing"
+         " in /etc and removed from the master branch:")
         result = self.add_list(result, self.user_added,
          f"List of files added to the 'master{branch_type}' branch:")
         result = self.add_list(result, self.user_updated,
@@ -487,10 +487,10 @@ class EtcMaint():
         print('\n'.join(sorted(set(etc_files).difference(repo_files))))
 
     def cmd_sync(self):
-        """Synchronize /etc with the changes made by the update command.
+        """Synchronize /etc with changes made by the previous update command.
 
-        This command must be run with sudo or as root when using the
-        --root-dir default value.
+        This command must be run as root when using the --root-dir default
+        value.
         """
         if not 'master-tmp' in self.repo.branches:
             return '%sno file to sync to /etc'

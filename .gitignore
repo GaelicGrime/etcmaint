@@ -1,4 +1,4 @@
 *.swp
 *.pyc
 .coverage
-README.html
+doc/_build/
