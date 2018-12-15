@@ -1,31 +1,31 @@
-An Arch Linux tool based on git for the maintenance of /etc files.
+**etcmaint** uses Git to merge the /etc configuration files installed by
+`pacman`_ that have been customized.
 
-* The ``master`` branch of the git repository tracks the /etc files that are
-  customized by the user.
-* /etc files installed or upgraded by ``pacman`` are tracked in the ``etc``
-  branch.
-* After a pacman upgrade, changes introduced to the files in the ``etc`` branch
-  that are also files customized by the user in the /etc directory, are
-  cherry-picked from the ``etc`` branch into the ``master`` branch with the
-  etcmaint ``update`` subcommand:
+* The customized configuration files in /etc are detected by etcmaint and
+  tracked in the ``master`` branch of the Git repository. See `Handling Config
+  Files`_ for when such a detection occurs. After a `pacman`_ upgrade,
+  etcmaint uses Git to merge the customized configuration files with the
+  changes introduced by the upgrade.
 
-  + Conflicts arising during the cherry-pick must be resolved and commited by
-    the user.
-  + All the changes made by the ``update`` subcommand are done in the
-    ``master-tmp`` and ``etc-tmp`` temporary branches.
-  + The etcmaint ``sync`` subcommand is used next to retrofit those changes to
-    the /etc directory and to merge the temporary branches into their main
-    counterparts thus finalizing the ``update`` subcommand (i.e.  the
-    ``update`` subcommand is not effective until the ``sync`` subcommand has
-    completed).
+* The configuration files in /etc that are not installed by `pacman`_, for
+  example netctl profiles, can be manually committed to the ``master`` branch.
+  Changes made to those files will then be also tracked by etcmaint.
 
-* The /etc files created by the user and manually added to the ``master``
-  branch are managed by etcmaint and the ensuing changes to those files are
-  automatically tracked by the etcmaint ``update`` subcommand.
+* etcmaint uses a ``master-tmp`` temporary branch, that stems from ``master``,
+  to commit all the changes made during a session. This temporary branch is
+  merged back into ``master`` only when the session is finalized, that is when
+  the customized configuration files that have been merged by Git are copied
+  back to /etc.
 
-The project is hosted on `GitLab`_.
+* The changes in the current etcmaint session before finalization can be
+  printed with::
 
-The documentation is on the project `GitLab Pages`_.
+    git diff master...master-tmp
 
-.. _`GitLab`: https://gitlab.com/xdegaye/etcmaint
-.. _`GitLab Pages`: https://xdegaye.gitlab.io/etcmaint/
+Documentation at `GitLab Pages`_.
+
+.. _`pacman`: https://www.archlinux.org/pacman/pacman.8.html
+.. _`Handling Config Files`: https://www.archlinux.org/pacman/pacman.8.html#_handling_config_files_a_id_hcf_a
+.. _`GitLab Pages`: <https://xdegaye.gitlab.io/etcmaint/
+
+.. vim:sts=2:sw=2:tw=78

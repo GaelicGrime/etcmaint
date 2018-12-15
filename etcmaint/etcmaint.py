@@ -489,6 +489,11 @@ class EtcMaint():
     def cmd_sync(self):
         """Synchronize /etc with changes made by the previous update command.
 
+        To print the changes that are going to be made to /etc by the 'sync'
+        command, run the git command:
+
+            git diff master...master-tmp
+
         This command must be run as root when using the --root-dir default
         value.
         """

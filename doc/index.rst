@@ -3,7 +3,6 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-========
 Features
 ========
 
@@ -12,8 +11,14 @@ Features
 
 .. toctree::
    :hidden:
+   :caption: Table of content
    :maxdepth: 2
 
-   command
-   design
-   vim
+   self
+   description
+   The etcmaint command <command>
+   conflict
+   install
+   development
+
+.. vim:sts=2:sw=2:tw=78
