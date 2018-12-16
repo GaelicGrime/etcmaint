@@ -213,11 +213,11 @@ class GitRepo():
             raise EmtError('no git repository at %s' % self.repodir)
         commit, first_commit_msg = proc.stdout.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
-            err_msg = f"""\
+            err_msg = ("""\
                 this is not an etcmaint repository
-                found as the first commit message:
-                '{first_commit_msg}'
-                instead of the expected '{FIRST_COMMIT_MSG}' message"""
+                First commit message found: '%s',
+                instead of the expected commit message: '%s'""" %
+                (first_commit_msg, FIRST_COMMIT_MSG))
             raise EmtError(dedent(err_msg))
 
         status = self.get_status()
@@ -343,21 +343,21 @@ class UpdateResults():
         result = self.add_list(result, self.new_packages,
          "List of the new packages:")
         result = self.add_list(result, self.etc_removed,
-         f"List of the files of the 'etc{branch_type}' branch missing in /etc"
-         " and removed from both branches:")
+         "List of the files of the 'etc%s' branch missing in /etc"
+         " and removed from both branches:" % branch_type)
         result = self.add_list(result, self.master_removed,
-         f"List of the files of the 'master{branch_type}' branch missing"
-         " in /etc and removed from the master branch:")
+         "List of the files of the 'master%s' branch missing"
+         " in /etc and removed from the master branch:" % branch_type)
         result = self.add_list(result, self.user_added,
-         f"List of files added to the 'master{branch_type}' branch:")
+         "List of files added to the 'master%s' branch:" % branch_type)
         result = self.add_list(result, self.user_updated,
-         f"List of files updated in the 'master{branch_type}' branch:")
+         "List of files updated in the 'master%s' branch:" % branch_type)
         result = self.add_list(result, self.pkg_add_etc,
-         f"List of files extracted from a package and added to the"
-             f" 'etc{branch_type}' branch:")
+         "List of files extracted from a package and added to the"
+             " 'etc%s' branch:" % branch_type)
         result = self.add_list(result, self.pkg_add_master,
-         f"List of files extracted from a package and added to the"
-             f" 'master{branch_type}' branch:")
+         "List of files extracted from a package and added to the"
+             " 'master%s' branch:" % branch_type)
         result = self.add_list(result, self.cherry_pick,
          'List of files to sync to /etc:')
         return result
@@ -797,36 +797,41 @@ class EtcMaint():
         self.repo.checkout('timestamps-tmp')
 
         for root, *remain in os.walk(cache_dir):
-            with os.scandir(root) as it:
-                for direntry in it:
-                    if not direntry.is_file():
-                        continue
+            # scandir() started supporting the context manager protocol in
+            # Python 3.6 (see issue bpo-25994) so we cannot use a context
+            # manager here and must delete 'it' when not used anymore so that
+            # the scandir() file descriptor is explicitly closed by Python.
+            it = os.scandir(root)
+            for direntry in it:
+                if not direntry.is_file():
+                    continue
 
-                    fullname = direntry.name
-                    if not fullname.endswith('.pkg.tar.xz'):
-                        continue
+                fullname = direntry.name
+                if not fullname.endswith('.pkg.tar.xz'):
+                    continue
 
-                    name, *remain = fullname.rsplit('-', maxsplit=3)
-                    if len(remain) != 3:
-                        warn('ignoring incorrect package name: %s' % fullname)
-                        continue
+                name, *remain = fullname.rsplit('-', maxsplit=3)
+                if len(remain) != 3:
+                    warn('ignoring incorrect package name: %s' % fullname)
+                    continue
 
-                    st_mtime = direntry.stat().st_mtime
-                    if (newer_exists_in(tracked, name, st_mtime) or
-                            newer_exists_in(new_pkgs, name, st_mtime, False)):
-                        continue
+                st_mtime = direntry.stat().st_mtime
+                if (newer_exists_in(tracked, name, st_mtime) or
+                        newer_exists_in(new_pkgs, name, st_mtime, False)):
+                    continue
 
-                    # Exclude packages.
-                    if (name in excluded or
-                            len(list(itertools.takewhile(lambda x: not x or
-                                not name.startswith(x),
-                                self.exclude_pkgs))) != exclude_pkgs_len):
-                        if name not in excluded:
-                            excluded.append(name)
-                        continue
+                # Exclude packages.
+                if (name in excluded or
+                        len(list(itertools.takewhile(lambda x: not x or
+                            not name.startswith(x),
+                            self.exclude_pkgs))) != exclude_pkgs_len):
+                    if name not in excluded:
+                        excluded.append(name)
+                    continue
 
-                    timestamps[name] = str(st_mtime)
-                    new_pkgs[name] = pathlib.PosixPath(direntry.path)
+                timestamps[name] = str(st_mtime)
+                new_pkgs[name] = pathlib.PosixPath(direntry.path)
+            del it
             # Look the full cache_dir tree only when scanning the 'aur-dir'
             # directory.
             if cache_dir != self.aur_dir:
