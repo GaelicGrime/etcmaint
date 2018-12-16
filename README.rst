@@ -26,6 +26,6 @@ Documentation at `GitLab Pages`_.
 
 .. _`pacman`: https://www.archlinux.org/pacman/pacman.8.html
 .. _`Handling Config Files`: https://www.archlinux.org/pacman/pacman.8.html#_handling_config_files_a_id_hcf_a
-.. _`GitLab Pages`: <https://xdegaye.gitlab.io/etcmaint/
+.. _`GitLab Pages`: https://xdegaye.gitlab.io/etcmaint/
 
 .. vim:sts=2:sw=2:tw=78
