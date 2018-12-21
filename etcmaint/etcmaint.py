@@ -15,7 +15,6 @@ import itertools
 import shutil
 import contextlib
 import subprocess
-import re
 from time import time as _time
 from textwrap import dedent, wrap
 from subprocess import PIPE, STDOUT, CalledProcessError
@@ -26,6 +25,8 @@ __version__ = '0.2'
 pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
+CHERRY_PICK_COMMIT_MSG = ('Files updated from new packages versions and'
+                          ' customized by user')
 EXCLUDE_FILES = 'passwd, group, mtab, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
 EXCLUDE_PREFIXES = 'ca-certificates, ssl/certs'
@@ -100,12 +101,6 @@ def copy_file(rpath, rootdir, repodir, repo_file=None):
                                        os.path.islink(repo_file)):
         os.remove(repo_file)
     shutil.copy(etc_file, repo_file, follow_symlinks=False)
-
-def str_file_list(header, files):
-    if files:
-        lines = [header]
-        lines.extend('  %s' % f for f in sorted(files))
-        return '\n'.join(lines)
 
 @contextlib.contextmanager
 def change_cwd(path):
@@ -224,8 +219,13 @@ class GitRepo():
 
         status = self.get_status()
         if status:
-            raise EmtError('the %s repository is not clean:\n%s' %
-                  (self.repodir, '\n'.join(status)))
+            msg = 'the %s repository is not clean\n' % self.repodir
+            msg += '\n'.join(status)
+            msg += '\n'
+            msg += dedent("""
+            Run 'git reset --hard' to discard any change in the working
+            tree and in the index.""")
+            raise EmtError(msg)
 
         if os.path.isfile(os.path.join(
                           self.repodir, '.git', 'CHERRY_PICK_HEAD')):
@@ -361,9 +361,7 @@ class EtcMaint():
         self.etc_commits = Etc_commits(
             added=Commit(self.repo, 'etc-tmp',
                     'Files added or updated from new package versions'),
-            cherry_pick=Commit(self.repo, 'etc-tmp',
-                    'Files updated from new packages versions and'
-                    ' customized by user'),
+            cherry_pick=Commit(self.repo, 'etc-tmp', CHERRY_PICK_COMMIT_MSG),
             removed=Commit(self.repo, 'etc-tmp',
                     'Files removed that do not exist in /etc', add=False),
             )
@@ -507,34 +505,34 @@ class EtcMaint():
         """Synchronize /etc with changes made by the previous update command.
 
         To print the changes that are going to be made to /etc by the 'sync'
-        command, run the git command:
+        command, first print the list of files that will be copied:
 
-            git diff master...master-tmp
+            etcmaint sync --dry-run
+
+        Then for each file in the list, run the following git command where
+        'rpath' is the relative path name as output by the previous command
+        and that starts with 'etc/':
+
+            git diff master...master-tmp -- rpath
 
         This command must be run as root when using the --root-dir default
         value.
         """
-        if not 'master-tmp' in self.repo.branches:
+        if not 'etc-tmp' in self.repo.branches:
             print(self.mode + 'no file to sync to /etc.')
+            return
 
-        # Find the cherry-pick in the master-tmp branch.
-        re_commit = re.compile('^commit (?P<sha>[0-9A-Fa-f]{40})$')
-        re_cherry_pick = re.compile(
-                        r'^\(cherry picked from commit [0-9A-Fa-f]{40}\)$')
-        res = self.repo.git_cmd('rev-list --format=%b master...master-tmp')
+        # Find the cherry-pick in the etc-tmp branch.
+        rev_list = self.repo.git_cmd('rev-list --format=%s etc...etc-tmp')
         cherry_pick_sha = None
-        sha = None
-        for line in res.splitlines():
-            matchobj = re_commit.match(line)
-            if matchobj:
-                sha = matchobj.group('sha')
-                continue
-            matchobj = re_cherry_pick.match(line)
-            if matchobj:
-                cherry_pick_sha = sha
+        for line in rev_list.splitlines():
+            if line.startswith('commit '):
+                sha = line[len('commit '):]
+            elif line == CHERRY_PICK_COMMIT_MSG:
+                cherry_pick_sha =  sha
                 break
         if cherry_pick_sha is None:
-            raise EmtError('cannot find a cherry-pick in master-tmp branch')
+            raise EmtError('cannot find a cherry-pick in the etc-tmp branch')
 
         # Copy the files commited in the cherry-pick to /etc.
         self.repo.checkout('master-tmp')
@@ -573,7 +571,7 @@ class EtcMaint():
         print(self.mode + "'sync' command terminated.")
 
     def create_tmp_branches(self):
-        print('Create the temporary branches')
+        print('Creating the temporary branches')
         branches = self.repo.branches
         for branch in ('etc', 'master', 'timestamps'):
             tmp_branch = '%s-tmp' % branch
@@ -587,7 +585,7 @@ class EtcMaint():
     def remove_tmp_branches(self):
         """Delete tmp branches, but merge first if not dry run."""
         if 'master-tmp' in self.repo.branches:
-            print('Remove the temporary branches')
+            print('Removing the temporary branches')
             if self.repo.curbranch in ('master-tmp', 'etc-tmp',
                                        'timestamps-tmp'):
                 self.repo.checkout('master')
@@ -663,27 +661,26 @@ class EtcMaint():
 
         self.print_commits(suffix='-tmp')
 
-        self.print('%s\n' % (str_file_list(
-                'List of files with a conflict to resolve first:',
-                conflicts)))
+        self.print('List of files with a conflict to resolve:')
+        self.print('\n'.join('  %s' % c for c in sorted(conflicts)))
 
         # Do the effective cherry-pick now after having printed the list of
         # files with a conflict to resolve.
         if not self.dry_run:
+            self.print()
             proc = self.repo.cherry_pick(cherry_pick_sha)
-            cwd = os.getcwd()
-            self.print(('Please resolve the conflict%s%s\n' %
-                    ('s' if len(conflicts) > 1 else '',
-                     '' if cwd.startswith(self.repodir) else ' in %s' %
-                                                            self.repodir)))
-            self.print('*** WITHOUT CHANGING THE COMMIT MESSAGE ***\n')
-            self.print('This is the result of the cherry-pick command:\n')
-            self.print('%s\n' % ('\n'.join('  %s' % l for l in
+            self.print('This is the output of the git cherry-pick command:')
+            self.print('%s' % ('\n'.join('  %s' % l for l in
                              proc.stdout.splitlines())))
+            self.print()
+            self.print('Please resolve the conflict%s.' %
+                       ('s' if len(conflicts) > 1 else ''))
+            if not os.getcwd().startswith(self.repodir):
+                self.print('You MUST change the current working directory'
+                           ' to %s.' % self.repodir)
             self.print(dedent("""\
-                You may use 'git -C %s cherry-pick --abort'
-                and start over later with another 'etcmaint update' command.
-            """ % self.repodir))
+                At any time you may run 'git cherry-pick --abort' and
+                start over later with another 'etcmaint update' command.""" ))
 
         return False
 

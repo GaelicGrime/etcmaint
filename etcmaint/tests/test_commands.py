@@ -252,6 +252,28 @@ class CommandsTestCase(BaseTestCase):
         self.emt.repo.add_files({os.path.join(ROOT_SUBDIR, fname): content},
                                commit_msg)
 
+    def simple_cherry_pick(self):
+        content = ['line %d' % n for n in range(5)]
+        user_content = content[:]; user_content[0] = 'user line 0'
+        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
+        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
+        self.run_cmd('create')
+        self.check_results(['a'], ['a'])
+
+        # A cherry-pick occurs.
+        package_content = content[:]; package_content[3] = 'package line 3'
+        self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
+        self.run_cmd('update')
+
+    def check_simple_cherry_pick(self, branch, branches):
+        self.check_results(['a'], ['a'], branches)
+        self.check_content(branch, 'a', dedent("""\
+                                               user line 0
+                                               line 1
+                                               line 2
+                                               package line 3
+                                               line 4"""))
+
 class CreateTestCase(CommandsTestCase):
     def test_create_plain(self):
         files = {'a': 'content'}
@@ -353,29 +375,7 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create', '--exclude-files', 'foo, b, bar')
         self.check_results([], ['a', 'bbb'])
 
-class UpdateSyncTestCase(CommandsTestCase):
-    def simple_cherry_pick(self):
-        content = ['line %d' % n for n in range(5)]
-        user_content = content[:]; user_content[0] = 'user line 0'
-        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
-        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
-        self.run_cmd('create')
-        self.check_results(['a'], ['a'])
-
-        # A cherry-pick occurs.
-        package_content = content[:]; package_content[3] = 'package line 3'
-        self.cmd.add_package('package_a', {'a': '\n'.join(package_content)})
-        self.run_cmd('update')
-
-    def check_simple_cherry_pick(self, branch, branches):
-        self.check_results(['a'], ['a'], branches)
-        self.check_content(branch, 'a', dedent("""\
-                                               user line 0
-                                               line 1
-                                               line 2
-                                               package line 3
-                                               line 4"""))
-
+class UpdateTestCase(CommandsTestCase):
     def test_update_plain(self):
         files = {'a': 'content'}
         self.cmd.add_etc_files(files)
@@ -597,21 +597,6 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
 
-    def test_update_conflict(self):
-        # A conflict: the file is customized by the user and the package
-        # upgrades its content at the same time.
-        self.cmd.add_etc_files({'a': 'content'})
-        self.cmd.add_package('package_a', {'a': 'content'})
-        self.run_cmd('create')
-        self.check_results([], ['a'])
-
-        self.cmd.add_etc_files({'a': 'new user content'})
-        self.cmd.add_package('package_a', {'a': 'new package content'})
-        self.run_cmd('update')
-        self.check_results([], ['a'], ETCMAINT_BRANCHES)
-        self.check_curbranch('master-tmp')
-        self.check_status(['UU %s/a' % ROOT_SUBDIR])
-
     def test_update_new_package(self):
         # Check that a package is updated with a new release.
         files = {'a': 'initial content'}
@@ -629,6 +614,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.check_results([], ['a'])
         self.check_content('etc', 'a', 'new content')
 
+class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):
         # Sync after a git cherry-pick.
         self.simple_cherry_pick()
@@ -646,11 +632,45 @@ class UpdateSyncTestCase(CommandsTestCase):
         out = self.emt.repo.git_cmd('diff master-prev...master')
         self.assertIn('-line 3\n+package line 3', out)
 
+    def update_conflict(self):
+        # A conflict: the file is customized by the user and the package
+        # upgrades its content at the same time.
+        self.cmd.add_etc_files({'a': 'content'})
+        self.cmd.add_package('package_a', {'a': 'content'})
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        self.cmd.add_etc_files({'a': 'new user content'})
+        self.cmd.add_package('package_a', {'a': 'new package content'})
+        self.run_cmd('update')
+        self.check_results([], ['a'], ETCMAINT_BRANCHES)
+        self.check_curbranch('master-tmp')
+        self.check_status(['UU %s/a' % ROOT_SUBDIR])
+
     def test_sync_unresolved_conflict(self):
         # Sync after a git cherry-pick.
-        self.test_update_conflict()
+        self.update_conflict()
         with self.assertRaisesRegex(EmtError, 'repository is not clean'):
             self.run_cmd('sync')
+
+    def test_sync_resolved_conflict(self):
+        # Sync after a resolved conflict.
+        self.update_conflict()
+        with open(os.path.join(self.emt.repodir, ROOT_SUBDIR, 'a')) as f:
+            content = f.read()
+        self.assertIn(dedent("""\
+            <<<<<<< HEAD
+            new user content
+            =======
+            new package content
+            >>>>>>>"""), content)
+        # Resove the conflict and commit the change.
+        self.emt.repo.add_files(
+            {os.path.join(ROOT_SUBDIR, 'a'):
+                'after conflict resolution'}, 'Resolve the conflict')
+        self.run_cmd('sync')
+        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
+        self.check_content('master', 'a', 'after conflict resolution')
 
     def test_sync_dry_run(self):
         # Sync after a git cherry-pick in dry-run mode.
@@ -681,9 +701,9 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
-        self.emt.repo.checkout('master-tmp', create=True)
+        self.emt.repo.checkout('etc-tmp', create=True)
         with self.assertRaisesRegex(EmtError,
-                          'cannot find a cherry-pick in master-tmp branch'):
+                          'cannot find a cherry-pick in the etc-tmp branch'):
             self.run_cmd('sync')
 
 class DiffTestCase(CommandsTestCase):

@@ -88,7 +88,7 @@ tag set at the previous 'update' command, named '<branch name>-prev', and the
 branch itself. For example, to list the names of the files that have been
 changed in the master branch:
 
-    git diff --name-only master-prev...master
+    ``git diff --name-only master-prev...master``
 
 Otherwise the fast-forwarding is postponed until the 'sync' command is run and
 until then it is still possible to start over with a new 'update' command, the
@@ -98,7 +98,7 @@ Git diff command run on the differences between the branch itself and the
 corresponding temporary branch. For example, to list all the changes that will
 be made by the 'sync' command to the master branch:
 
-    git diff master...master-tmp
+    ``git diff master...master-tmp``
 
 Options
 """""""
@@ -117,10 +117,16 @@ Description
 :program:`etcmaint sync` synchronizes /etc with changes made by the previous
 update command.
 
-To print the changes that are going to be made to /etc by the 'sync'
-command, run the Git command:
+To print the changes that are going to be made to /etc by the 'sync' command,
+first print the list of files that will be copied:
 
-    git diff master...master-tmp
+    ``etcmaint sync --dry-run``
+
+Then for each file in the list, run the following git command where 'rpath' is
+the relative path name as output by the previous command and that starts with
+'etc/':
+
+    ``git diff master...master-tmp -- rpath``
 
 This command must be run as root when using the --root-dir default value.
 
