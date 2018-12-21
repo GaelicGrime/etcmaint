@@ -46,6 +46,7 @@ def captured_output():
     finally:
         setattr(sys, 'stdout', _stdout)
         setattr(sys, 'stdout', _stderr)
+        strio.close()
 
 def raise_context_of_exit(func, *args, **kwds):
     try:
@@ -180,11 +181,12 @@ class CommandLineTestCase(BaseTestCase):
     @skipIf(not os.path.exists(PACMAN_CONF), '%s does not exist' % PACMAN_CONF)
     def test_cl_pacman_conf(self):
         # Check that CacheDir may be parsed in /etc/pacman.conf.
-        emt = EtcMaint()
-        emt.root_dir = '/'
-        emt.cache_dir = None
-        emt.init()
-        self.assertEqual(os.path.isdir(emt.cache_dir), True)
+        with io.StringIO() as results:
+            emt = EtcMaint(results)
+            emt.root_dir = '/'
+            emt.cache_dir = None
+            emt.init()
+            self.assertEqual(os.path.isdir(emt.cache_dir), True)
 
     def test_cl_main_help(self):
         self.make_base_dirs()
@@ -323,7 +325,7 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.assertNotIn('package-1.0-Y',
                         ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
-                        p in self.emt.results.new_packages))
+                        p in self.emt.new_packages))
         self.check_results(['a'], ['a'])
         # The oldest release file is in master: it is the content of the /etc
         # file which differs from the content of the newest release (and
@@ -416,7 +418,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.add_repo_file('master', fname, 'content', 'some commit msg')
         self.run_cmd('update')
         self.assertIn(os.path.join(ROOT_SUBDIR, fname),
-                                   self.emt.results.master_removed)
+                                   self.emt.master_commits.removed.rpaths)
 
     def test_update_package_and_etc_differ_removed(self):
         # Remove 'a' /etc file and it is removed from the etc branch on
@@ -446,7 +448,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.cmd.add_package('package', files, release='X')
         self.run_cmd('update')
         self.check_results([], ['a'])
-        self.assertFalse(self.emt.results.pkg_add_etc)
+        self.assertFalse(self.emt.etc_commits.added.rpaths)
 
     def test_update_with_new_package(self):
         self.cmd.add_etc_files({'a': 'content'})
@@ -623,7 +625,7 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.assertNotIn('package-1.0-X',
                         ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
-                        p in self.emt.results.new_packages))
+                        p in self.emt.new_packages))
         self.check_results([], ['a'])
         self.check_content('etc', 'a', 'new content')
 
@@ -633,9 +635,9 @@ class UpdateSyncTestCase(CommandsTestCase):
         self.run_cmd('sync')
         self.check_simple_cherry_pick('master',
                                       ['etc', 'master', 'timestamps'])
-        fname = os.path.join(ROOT_SUBDIR, 'a')
-        self.assertEqual(EtcPath(self.tmpdir, REPO_DIR, fname),
-                         EtcPath(self.tmpdir, ROOT_DIR, fname))
+        rpath = os.path.join(ROOT_SUBDIR, 'a')
+        self.assertEqual(EtcPath(self.tmpdir, REPO_DIR, rpath),
+                         EtcPath(self.tmpdir, ROOT_DIR, rpath))
 
     def test_previous_tag(self):
         # Check the '<branch>-prev' git tag.

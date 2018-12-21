@@ -82,6 +82,52 @@ To list the names of the files that have been changed::
 
   git diff --name-only master-prev...master
 
+Commit messages
+---------------
+
+The ``update`` subcommand is the single originator of all the commits made in
+the repository by etcmaint.
+
+Commit messages in the etc branch
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+*Files added or updated from new package versions*
+  Files added or updated in the ``etc`` branch that have been added or
+  upgraded by pacman since the last etcmaint session.
+
+*Files updated from new packages versions and customized by user*
+  Files upgraded from a new package version that are customized by the user in
+  /etc. The package file is commited to the ``etc`` branch (pacman has
+  installed the package file with a ``.pacnew`` extension) and the changes
+  from the previous version are merged (actually cherry-picked) into the
+  ``master`` branch.
+
+*Files removed that do not exist in /etc*
+  Files that do not exist anymore in /etc have been removed from the ``etc``
+  branch.
+
+
+Commit messages in the master branch
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+*Files added from /etc after extracting new packages*
+  Files copied from /etc to the ``master`` branch that are listed in a package
+  that was not previously installed, while the corresponding file already
+  exists on /etc and is different from the package file.
+
+*Files updated from new packages versions and customized by user*
+  These are the files listed under the same commit message in the ``etc``
+  branch and whose content is the result of the merge. They will be copied to
+  /etc by the ``sync`` subcommand.
+
+*Files removed that do not exist in /etc*
+  Files that do not exist anymore in /etc have been removed from the
+  ``master`` branch.
+
+*Files updated by the user in /etc*
+  Files that are tracked by etcmaint in the ``master`` branch and that have
+  been modified in /etc since the last etcmaint session.
+
 Caveats:
 --------
 
