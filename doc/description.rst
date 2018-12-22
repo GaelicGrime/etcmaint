@@ -86,9 +86,10 @@ Commit messages
 ---------------
 
 The ``update`` subcommand is the only subcommand to add commits to the
-repository. The git author of those commits is named ``etcmaint``. The git
-author of the commits made when resolving merge conflicts is the user of
-etcmaint as configured in Git, see `Git configuration`_.
+repository. The git author and commiter of those commits is named
+``etcmaint``. The git commiter of the commits made when resolving merge
+conflicts is the user of etcmaint as configured in Git, see `Git
+configuration`_.
 
 Commit messages in the etc branch
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
