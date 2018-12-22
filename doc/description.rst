@@ -85,8 +85,10 @@ To list the names of the files that have been changed::
 Commit messages
 ---------------
 
-The ``update`` subcommand is the single originator of all the commits made in
-the repository by etcmaint.
+The ``update`` subcommand is the only subcommand to add commits to the
+repository. The git author of those commits is named ``etcmaint``. The git
+author of the commits made when resolving merge conflicts is the user of
+etcmaint as configured in Git, see `Git configuration`_.
 
 Commit messages in the etc branch
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -145,5 +147,6 @@ Caveats:
 
 .. _`pacman`: https://www.archlinux.org/pacman/pacman.8.html
 .. _`pacman.conf`: https://www.archlinux.org/pacman/pacman.conf.5.html
+.. _`Git configuration`: https://wiki.archlinux.org/index.php/git#Configuration
 
 .. vim:sts=2:sw=2:tw=78

@@ -27,6 +27,8 @@ RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
 CHERRY_PICK_COMMIT_MSG = ('Files updated from new packages versions and'
                           ' customized by user')
+GIT_USER_CONFIG = ['-c', 'user.email="etcmaint email"',
+                   '-c', 'user.name=etcmaint']
 EXCLUDE_FILES = 'passwd, group, mtab, udev/hwdb.bin'
 EXCLUDE_PKGS = ''
 EXCLUDE_PREFIXES = 'ca-certificates, ssl/certs'
@@ -249,10 +251,12 @@ class GitRepo():
     def git_cmd(self, cmd):
         if type(cmd) == str:
             cmd = cmd.split()
-        output = subprocess.check_output(self.git + cmd,
-                                    universal_newlines=True, stderr=STDOUT)
+        proc = subprocess.run(self.git + cmd,
+                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        if proc.returncode != 0:
+            raise EmtError(proc.stdout)
 
-        output = output.strip()
+        output = proc.stdout.strip()
         if self.verbose and output:
             print(output)
         return output
@@ -270,6 +274,9 @@ class GitRepo():
             self.git_cmd('checkout %s' % branch)
         self.curbranch = branch
 
+    def commit(self, commit_msg):
+        self.git_cmd(GIT_USER_CONFIG + ['commit', '-m', commit_msg])
+
     def add_files(self, files, commit_msg):
         """Add and commit a list of files.
 
@@ -284,11 +291,12 @@ class GitRepo():
                 f.write(files[rpath])
         if paths:
             self.git_cmd(['add'] + paths)
-            self.git_cmd(['commit', '-m', commit_msg])
+            self.commit(commit_msg)
 
     def cherry_pick(self, sha):
-        return subprocess.run(self.git + ['cherry-pick', '-x', sha],
-                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        return subprocess.run(self.git + GIT_USER_CONFIG +
+                    ['cherry-pick', '-x', sha],
+                    universal_newlines=True, stdout=PIPE, stderr=STDOUT)
 
     def tracked_files(self, branch):
         """A dictionary of the tracked files in this branch."""
@@ -332,7 +340,7 @@ class Commit():
         #   getconf ARG_MAX'    ->  2097152
         cmd = 'add' if self.add else 'rm'
         self.repo.git_cmd([cmd] + self.rpaths)
-        self.repo.git_cmd(['commit', '-m', self.commit_msg])
+        self.repo.commit(self.commit_msg)
 
 class EtcMaint():
     """Provide methods to implement the commands."""
