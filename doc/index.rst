@@ -15,10 +15,11 @@ Features
    :maxdepth: 2
 
    self
+   install
    description
    The etcmaint command <command>
    conflict
-   install
    development
+   Source code <https://gitlab.com/xdegaye/etcmaint>
 
 .. vim:sts=2:sw=2:tw=78

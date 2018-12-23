@@ -36,59 +36,50 @@ Conflict resolution
 
 .. note::
 
-   Remember that etcmaint uses *merge* in its documentation while it is a
-   *cherry-pick* that the etcmaint implementation is actually doing.
+   etcmaint uses the term *merge* in its documentation while it is a
+   *cherry-pick* that the implementation is actually doing.
 
-In this example a single file named ``config.conf`` has been updated by the
-user and upgraded by pacman. The changes made at the second line of the file
-are in conflict. In the ``master`` branch it is::
+In this example the /etc/shorewall/shorewall.conf file from the shorewall
+package has been modified by the user (``STARTUP_ENABLED`` has been set to
+``Yes``) and a new version of the package adds a new comment line. The diff
+of both files is shown below::
 
-  line 2 - edited by user
+  $ diff $XDG_DATA_HOME/cachedir/etc/shorewall/shorewall.conf $XDG_DATA_HOME/root/etc/shorewall/shorewall.conf
+  11,12c11,12
+  < # Package shorewall-5.2.2.1-1
+  < STARTUP_ENABLED=No
+  ---
+  >
+  > STARTUP_ENABLED=Yes
 
-In the ``etc-tmp`` branch it is, after the pacman upgrade::
-
-  line 2 - pacman upgraded
-
-The following bash session resolves the conflict:
+After the new version of the shorewall package has been upgraded with pacman,
+the ``etcmaint update`` command detects the conflict as shown in the top half
+of the bash session captured in the following image.
 
 .. image:: _static/conflict_1.png
 
-The next sections describe each command of this bash session.
+This bash session shows also the six commands used next to resolve the
+conflict. The next paragraphs detail these commands.
 
-Simulate an etcmaint cherry-pick
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-The first command,
-``git cherry-pick 1549fdedf3f217341fd773d8deabf3f013e62955``,
-is actually run by etcmaint and the command is used here to emulate etcmaint
-behavior for this simple example. Its output shows what to expect when the
-cherry-pick fails in etcmaint.
+Run mergetool
+^^^^^^^^^^^^^
 
-The next prompt shows that we are on the ``master-tmp`` branch and
+The first command changes the current working directory to the etcmaint
+repository. The prompt shows then that we are on the ``master-tmp`` branch and
 ``*+|CHERRY-PICKING`` tells us we are about to resolve conflicts and that
-there are modified and staged files. To know which files are in conflicts
-run the status Git command::
+there are modified and staged files.
 
-  [xavier@bilboquet example (master-tmp *+|CHERRY-PICKING)]$ git status
-  On branch master-tmp
-  You are currently cherry-picking commit 1549fde.
-    (fix conflicts and run "git cherry-pick --continue")
-    (use "git cherry-pick --abort" to cancel the cherry-pick operation)
+To know which files are in conflicts we run the second command ``git status
+-s``, that confirms that etc/shorewall/shorewall.conf is ``unmerged``. See the
+**Short Format** section of the `git-status man page`_ for the description of
+the output of this command.
 
-  Unmerged paths:
-    (use "git add <file>..." to mark resolution)
+The next command ``git mergetool`` starts an instance of gvim for each file
+that is in conflict (here we only have one).
 
-          both modified:   config.conf
-
-  no changes added to commit (use "git add" and/or "git commit -a")
-
-The next command, ``git mergetool``, will start an instance of gvim for each
-file that is in conflict (here we only have one).
-
-Cancel the resolution on one file
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .. image:: _static/conflict_2.png
 
-The ``git mergetool`` command starts a gvim instance with four buffers. The
+The ``git mergetool`` command starts gvim instance(s) with four buffers. The
 leftmost one is the file to be merged in the ``master-tmp`` branch, i.e. the
 result of the merge. This is the only buffer that is not readonly.
 
@@ -104,36 +95,45 @@ The other three buffers are from left to right:
   branches which is only really useful for Git merges and not for
   cherry-picks.
 
-Here we decide to abandon the conflict resolution of this file by enterring
-the ``:cquit`` Vim command to tell Git that the merge has failed. We could
-then abort the cherry-pick with ``git cherry-pick --abort`` and start over
-from scratch a new etcmaint session with the ``update`` etcmaint command.
+At that time we may decide to abandon the conflict resolution of this file by
+entering the ``:cquit`` Vim command to tell Git that the merge has failed. We
+could decide then:
 
-Resolve the conflict on one file
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* either to abort the cherry-pick with ``git cherry-pick --abort`` and start
+  over from scratch a new etcmaint session with the ``update`` etcmaint
+  command,
+* or to make another attempt at resolving the conflict by running again the
+  mergetool git subcommand.
+
+Resolve the conflict
+^^^^^^^^^^^^^^^^^^^^
+
+In the following image we are about to resolve the conflict after having
+removed the conflicts markers and having kept the lines from both branches in
+the leftmost buffer and by saving the result with the ``:wqa`` Vim command.
 
 .. image:: _static/conflict_3.png
-
-Instead of aborting the cherry-pick we decide to make another attempt and
-issue a second ``git mergetool``. We fix the merge in the leftmost buffer
-by keeping the lines from both branches and
-save the result with the ``:wqa`` Vim command.
 
 Commit the cherry-pick
 ^^^^^^^^^^^^^^^^^^^^^^
 
+The next ``git status -s`` command confirms that the changes in this file are
+ready to be commited and this is done with the ``git cherry-pick --continue``
+command.  This last command spawns the editor to allow us, if necessary, to
+edit the commit message which is the original message of the commit in the
+``etc-tmp`` branch we are cherry-picking from.
+
+Note that it is safe to run cherry-pick with ``--continue`` even when missing
+the fact that there are still conflicts pending, the command fails with an
+explicit error message in that case.
+
 .. image:: _static/conflict_4.png
 
-All conflicts are now fixed and the ``git cherry-pick --continue`` last
-command spawns gvim to allow us, if necessary, to edit the commit message
-which is the original message of the commit we are cherry-picking from.
-It is safe to run cherry-pick with ``--continue`` when there are still
-conflicts pending, the command exits with an explicit error message in that
-case.
+The ``update`` etcmaint command is now fully completed as confirmed by the
+output of the last command ``git status -s``. And the etcmaint session can be
+finalized by running the etcmaint ``sync`` command to copy the merged files to
+/etc.
 
-The ``update`` etcmaint command is now fully completed and changes made by
-this command, including the cherry-pick, can now be checked with::
-
-  git diff master...master-tmp
+.. _`git-status man page`: https://git-scm.com/docs/git-status
 
 .. vim:sts=2:sw=2:tw=78
