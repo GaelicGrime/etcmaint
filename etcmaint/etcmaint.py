@@ -689,6 +689,10 @@ class EtcMaint():
             self.print(dedent("""\
                 At any time you may run 'git cherry-pick --abort' and
                 start over later with another 'etcmaint update' command.""" ))
+        else:
+            self.print(self.mode +
+                "'update' command terminated with conflict%s to resolve." %
+                ('s' if len(conflicts) > 1 else ''))
 
         return False
 
