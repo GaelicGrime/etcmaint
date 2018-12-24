@@ -850,9 +850,6 @@ class EtcMaint():
             self.repo.add_files(timestamps,
                                 'Add the timestamps of the new packages')
             self.new_packages = list(pkg.name for pkg in new_pkgs.values())
-            self.print('New packages:')
-            self.print('\n'.join('  %s' % p for p in
-                                 sorted(self.new_packages)))
 
         return new_pkgs.values()
 
