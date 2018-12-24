@@ -614,6 +614,22 @@ class UpdateTestCase(CommandsTestCase):
         self.check_results([], ['a'])
         self.check_content('etc', 'a', 'new content')
 
+    def test_update_removed_after_upgrade(self):
+        # Issue #8
+        # A file is upgraded by a new package version and deleted from /etc
+        # before the update command.
+        files = {'a': 'a initial content'}
+        files['b'] = 'b initial content'
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files, release='X')
+        self.run_cmd('create')
+
+        files['a'] = 'a new content'
+        files['b'] = 'b new content'
+        self.cmd.add_package('package', files, release='Y')
+        self.cmd.remove_etc_file('b')
+        self.run_cmd('update')
+
 class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):
         # Sync after a git cherry-pick.

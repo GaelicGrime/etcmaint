@@ -614,8 +614,8 @@ class EtcMaint():
     def update_repository(self):
         self.create_tmp_branches()
 
-        cherry_pick_sha = self.git_upgraded_pkgs()
         self.git_removed_files()
+        cherry_pick_sha = self.git_upgraded_pkgs()
         self.git_user_updates()
 
         if cherry_pick_sha is not None:
@@ -765,7 +765,8 @@ class EtcMaint():
             self.etc_commits.cherry_pick.commit()
             cherry_pick_sha = self.repo.git_cmd('rev-list -1 HEAD --')
 
-        # Clean the working area.
+        # Clean the working area of the files that are not under version
+        # control.
         self.repo.git_cmd('clean -d -x -f')
 
         # Update the master-tmp branch with new files.
@@ -945,7 +946,17 @@ class EtcMaint():
             new = EtcPath(self.root_dir, self.repodir, rpath)
             current = EtcPath(self.root_dir, self.root_dir, rpath)
             if current.digest == b'':
-                warn('skip %s: not readable' % rpath)
+                path = current.path
+                exists = True
+                try:
+                    if not path.exists():
+                        exists = False
+                except PermissionError:
+                    pass
+                if not exists:
+                    warn('skip %s, file does not exist' % path)
+                else:
+                    warn('skip %s, file is not readable' % path)
                 continue
 
             # A new package has been installed.
