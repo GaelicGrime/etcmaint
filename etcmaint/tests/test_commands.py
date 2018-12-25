@@ -71,7 +71,7 @@ class Command():
         self.cache_dir = os.path.join(self.tmpdir, CACHE_DIR)
         self.root_dir = os.path.join(self.tmpdir, ROOT_DIR)
 
-    def add_files(self, files, dir_path=''):
+    def _add_files(self, files, dir_path=''):
         """'files' dictionary of file names mapped to content or SymLink."""
         for fname in files:
             path = os.path.join(dir_path, ROOT_SUBDIR, fname)
@@ -83,13 +83,15 @@ class Command():
                 linkto = val.linkto
                 if val.abspath:
                     linkto =  os.path.join(self.root_dir, ROOT_SUBDIR, linkto)
+                if os.path.lexists(path):
+                    os.unlink(path)
                 os.symlink(linkto, path)
             else:
                 with open(path, 'w') as f:
                     f.write(val)
 
     def add_etc_files(self, files):
-        self.add_files(files, self.root_dir)
+        self._add_files(files, self.root_dir)
 
     def add_package(self, name, files, version='1.0', release='1',
                     cache_dir=None, delta_mtime=None):
@@ -100,7 +102,7 @@ class Command():
         pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
                                 (name, version, release, os.uname().machine))
         with temp_cwd():
-            self.add_files(files)
+            self._add_files(files)
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
@@ -239,6 +241,17 @@ class CommandsTestCase(BaseTestCase):
         content = self.emt.repo.git_cmd('show %s:%s' %
                                 (branch, os.path.join(ROOT_SUBDIR, fname)))
         self.assertEqual(content, expected)
+
+    def check_is_symlink(self, branch, fname):
+        rpath = os.path.join(ROOT_SUBDIR, fname)
+        tree = self.emt.repo.git_cmd('ls-tree -r %s' % branch)
+        for line in tree.splitlines():
+            mode, type, object, file = line.split()
+            if file == rpath:
+                self.assertEqual(mode[:3], '120')
+                break
+        else:
+            self.fail('%s not found by git ls-tree' % rpath)
 
     def check_status(self, expected):
         self.assertEqual(self.emt.repo.get_status(), expected)
@@ -497,8 +510,8 @@ class UpdateTestCase(CommandsTestCase):
             out.append(self.stdout.getvalue())
         self.assertEqual(out[0], out[1])
 
-    def test_update_symlink(self):
-        # 'a' /etc file is changed to a symlink.
+    def test_update_user_symlink(self):
+        # 'a' /etc file is changed to a symlink by the user.
         files = {'a': 'content', 'b': 'content'}
         self.cmd.add_etc_files(files)
         files['a'] = 'package content'
@@ -506,12 +519,28 @@ class UpdateTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results(['a'], ['a', 'b'])
 
-        self.cmd.remove_etc_file('a')
         self.cmd.add_etc_files({'a': SymLink('b', True)})
         self.run_cmd('update')
         self.check_results(['a'], ['a', 'b'])
         self.check_content('etc', 'a', 'package content')
         self.check_content('master', 'a', self.cmd.etc_abspath('b'))
+
+    def test_update_upgrade_symlink(self):
+        # Issue #9.
+        # 'a' /etc file is changed to a symlink by an upgrade.
+        files = {'a': 'a content', 'b': 'b content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a', 'b'])
+
+        files['a'] = SymLink('b', False)
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('update')
+        self.check_results([], ['a', 'b'])
+        self.check_content('etc', 'a', 'b')
+        self.check_is_symlink('etc', 'a')
 
     def test_update_user_customize(self):
         # File customized by user is added to the master branch upon 'update'.
@@ -638,8 +667,7 @@ class SyncTestCase(CommandsTestCase):
         self.check_simple_cherry_pick('master',
                                       ['etc', 'master', 'timestamps'])
         rpath = os.path.join(ROOT_SUBDIR, 'a')
-        self.assertEqual(EtcPath(self.tmpdir, REPO_DIR, rpath),
-                         EtcPath(self.tmpdir, ROOT_DIR, rpath))
+        self.assertEqual(EtcPath(REPO_DIR, rpath), EtcPath(ROOT_DIR, rpath))
 
     def test_previous_tag(self):
         # Check the '<branch>-prev' git tag.

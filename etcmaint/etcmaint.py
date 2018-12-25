@@ -128,46 +128,30 @@ def threadsafe_makedirs():
         os.makedirs = saved_makedirs
 
 class EtcPath():
-    def __init__(self, root_dir, *parts):
-        assert len(parts) >= 2
-        assert parts[-1].startswith(ROOT_SUBDIR)
-        self.root_dir = root_dir
-        self.parts = parts
-        self.path = pathlib.PosixPath(*parts)
+    def __init__(self, basedir, rpath):
+        assert rpath.startswith(ROOT_SUBDIR)
+        self.path = pathlib.PosixPath(basedir, rpath)
         self._digest = None
+        try:
+            self.is_symlink = self.path.is_symlink()
+        except OSError:
+            self._digest = b''
 
     @property
     def digest(self):
         if self._digest is None:
             try:
-                is_symlink = self.path.is_symlink()
-            except OSError:
-                self._digest = b''
-            else:
-                if is_symlink:
+                if self.is_symlink:
                     # The digest is the path to which the symbolic link
                     # points.
-                    realpath = self.path.resolve()
-                    basedir = pathlib.PosixPath(*self.parts[:-1])
-                    try:
-                        # The symlink is a relative path.
-                        self._digest = realpath.relative_to(basedir)
-                    except ValueError:
-                        try:
-                            # The symlink is an absolute path.
-                            self._digest = realpath.relative_to(self.root_dir)
-                        except ValueError:
-                            warn('%s links to %s not prefixed with %s' %
-                                 (self.path, realpath, self.root_dir))
-                            self._digest = realpath
+                    self._digest = os.readlink(self.path)
                 else:
-                    try:
-                        h = hashlib.sha1()
-                        with self.path.open('rb') as f:
-                            h.update(f.read())
-                        self._digest = h.digest()
-                    except OSError:
-                        self._digest = b''
+                    h = hashlib.sha1()
+                    with self.path.open('rb') as f:
+                        h.update(f.read())
+                    self._digest = h.digest()
+            except OSError:
+                self._digest = b''
         return self._digest
 
     def __eq__(self, other):
@@ -311,7 +295,7 @@ class GitRepo():
             else:
                 if not rpath.startswith(ROOT_SUBDIR):
                     continue
-                d[rpath] = EtcPath(self.root_dir, self.repodir, rpath)
+                d[rpath] = EtcPath(self.repodir, rpath)
         return d
 
     @property
@@ -717,7 +701,7 @@ class EtcMaint():
         """Update master-tmp with the user changes."""
 
         suffixes = ['.pacnew', '.pacsave', '.pacorig']
-        etc_files = {n: EtcPath(self.root_dir, self.root_dir, n) for n in
+        etc_files = {n: EtcPath(self.root_dir, n) for n in
                      list_rpaths(self.root_dir, ROOT_SUBDIR,
                                  suffixes=suffixes)}
         etc_tracked = self.repo.tracked_files('etc-tmp')
@@ -877,12 +861,22 @@ class EtcMaint():
             tar = tarfile.open(str(pkg), mode='r:xz', debug=1)
             tarinfos = list(etc_files_filter(tar.getmembers()))
             for tinfo in tarinfos:
-                path = EtcPath(self.root_dir, self.repodir, tinfo.name)
+                path = EtcPath(self.repodir, tinfo.name)
                 # Remember the sha1 of the existing file, if it exists, before
                 # extracting it from the tarball (EtcPath.digest is lazily
                 # evaluated).
-                ignored = path.digest
+                not_used = path.digest
                 extracted[tinfo.name] = path
+
+                # The Python tarfile implementation fails to create symlinks,
+                # see also issue bpo-10761.
+                if tinfo.issym():
+                    abspath = os.path.join(self.repodir, tinfo.name)
+                    try:
+                        if os.path.lexists(abspath):
+                            os.unlink(abspath)
+                    except OSError as err:
+                        warn(err)
             tar.extractall(self.repodir, members=tarinfos)
             print('scanned', pkg.name)
 
@@ -943,8 +937,8 @@ class EtcMaint():
         original_files = self.extract(packages, etc_tracked)
 
         for rpath in original_files:
-            new = EtcPath(self.root_dir, self.repodir, rpath)
-            current = EtcPath(self.root_dir, self.root_dir, rpath)
+            new = EtcPath(self.repodir, rpath)
+            current = EtcPath(self.root_dir, rpath)
             if current.digest == b'':
                 path = current.path
                 exists = True
