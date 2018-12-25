@@ -632,10 +632,9 @@ class EtcMaint():
             self.repo.checkout('cherry-pick', create=True)
             proc = self.repo.cherry_pick(cherry_pick_sha)
             if proc.returncode == 0:
-                if not self.dry_run:
-                    # Do a fast-forward merge.
-                    self.repo.checkout('master-tmp')
-                    self.repo.git_cmd('merge cherry-pick')
+                # Do a fast-forward merge.
+                self.repo.checkout('master-tmp')
+                self.repo.git_cmd('merge cherry-pick')
                 return True
             else:
                 conflicts = [x[3:] for x in self.repo.get_status()
