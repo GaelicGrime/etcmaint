@@ -71,7 +71,7 @@ class Command():
         self.cache_dir = os.path.join(self.tmpdir, CACHE_DIR)
         self.root_dir = os.path.join(self.tmpdir, ROOT_DIR)
 
-    def _add_files(self, files, dir_path=''):
+    def add_files(self, files, dir_path=''):
         """'files' dictionary of file names mapped to content or SymLink."""
         for fname in files:
             path = os.path.join(dir_path, ROOT_SUBDIR, fname)
@@ -91,7 +91,7 @@ class Command():
                     f.write(val)
 
     def add_etc_files(self, files):
-        self._add_files(files, self.root_dir)
+        self.add_files(files, self.root_dir)
 
     def add_package(self, name, files, version='1.0', release='1',
                     cache_dir=None, delta_mtime=None):
@@ -102,7 +102,7 @@ class Command():
         pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
                                 (name, version, release, os.uname().machine))
         with temp_cwd():
-            self._add_files(files)
+            self.add_files(files)
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
@@ -658,6 +658,33 @@ class UpdateTestCase(CommandsTestCase):
         self.cmd.add_package('package', files, release='Y')
         self.cmd.remove_etc_file('b')
         self.run_cmd('update')
+
+    def test_update_tracked_changes(self):
+        # Issue #10.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        files['a'] = 'package content'
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results(['a'], ['a'])
+
+        files['a'] = 'changed content in tracked file'
+        self.cmd.add_files(files, self.emt.repodir)
+        with self.assertRaisesRegex(EmtError, "Run 'git reset --hard'"):
+            self.run_cmd('update')
+
+    def test_update_untracked_changes(self):
+        # Issue #10.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        files = {'b': 'content of untracked file'}
+        self.cmd.add_files(files, self.emt.repodir)
+        with self.assertRaisesRegex(EmtError, "Run 'git clean -d -x -f'"):
+            self.run_cmd('update')
 
 class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):

@@ -205,18 +205,24 @@ class GitRepo():
 
         status = self.get_status()
         if status:
-            msg = 'the %s repository is not clean\n' % self.repodir
+            tracked = untracked = False
+            for line in status:
+                if line[:2] == '??':
+                    untracked = True
+                else:
+                    tracked = True
+            msg = 'the %s repository is not clean:\n' % self.repodir
             msg += '\n'.join(status)
             msg += '\n'
-            msg += dedent("""
-            Run 'git reset --hard' to discard any change in the working
-            tree and in the index.""")
+            if tracked:
+                msg += dedent("""
+                Run 'git reset --hard' to discard any change in the working
+                tree and in the index.""")
+            if untracked:
+                msg += dedent("""
+                Run 'git clean -d -x -f' to clean the working tree by
+                recursively removing files not under version control.""")
             raise EmtError(msg)
-
-        if os.path.isfile(os.path.join(
-                          self.repodir, '.git', 'CHERRY_PICK_HEAD')):
-            raise EmtError("The previous cherry-pick is empty,"
-                           " please use 'git reset'")
 
         # Get the initial branch.
         proc = subprocess.run(self.git + ['symbolic-ref', '--short', 'HEAD'],
@@ -240,7 +246,7 @@ class GitRepo():
         if proc.returncode != 0:
             raise EmtError(proc.stdout)
 
-        output = proc.stdout.strip()
+        output = proc.stdout.rstrip()
         if self.verbose and output:
             print(output)
         return output
