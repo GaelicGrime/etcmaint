@@ -194,8 +194,6 @@ class BaseTestCase(TestCase):
         self.cmd = Command(self.tmpdir)
 
     def run_cmd(self, command, *args, with_rootdir=True):
-        self.stdout.seek(0)
-        self.stdout.truncate(0)
         try:
             self.emt = self.cmd.run(command, *args, with_rootdir=with_rootdir)
         finally:
@@ -203,6 +201,10 @@ class BaseTestCase(TestCase):
                 out = self.stdout.getvalue()
                 if out:
                     print(out, file=self._stderr)
+
+    def clear_stdout(self):
+        self.stdout.seek(0)
+        self.stdout.truncate(0)
 
     def check_output(self, equal=None, is_in=None, is_notin=None):
         out = self.stdout.getvalue()
@@ -538,6 +540,8 @@ class UpdateTestCase(CommandsTestCase):
         files = {'b': 'b content'}
         self.cmd.add_etc_files(files)
         pkg_b = self.cmd.add_package('package_b', files)
+
+        self.clear_stdout()
         self.run_cmd('update')
         self.check_results([], ['a', 'b'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'b', 'b content')
@@ -928,7 +932,11 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_package('package_b', {'b': 'b content'})
         self.run_cmd('update')
         self.check_results([], ['a'], ETCMAINT_BRANCHES)
+
+        self.clear_stdout()
         self.run_cmd('diff')
         self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'b'))
+
+        self.clear_stdout()
         self.run_cmd('diff', '--use-etc-tmp')
         self.check_output(equal='\n')
