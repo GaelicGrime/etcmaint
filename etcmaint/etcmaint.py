@@ -9,16 +9,12 @@ import argparse
 import pathlib
 import inspect
 import configparser
-import tarfile
 import hashlib
 import itertools
 import shutil
 import contextlib
 import subprocess
-from time import time as _time
 from textwrap import dedent, wrap
-from subprocess import PIPE, STDOUT, CalledProcessError
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import namedtuple
 
 __version__ = '0.2'
@@ -42,6 +38,18 @@ class EmtError(Exception): pass
 
 def warn(msg):
     print('*** warning:', msg, file=sys.stderr)
+
+def run_cmd(cmd, error='', ignore_failure=False):
+    proc = subprocess.run(cmd, universal_newlines=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if proc.returncode != 0 and not ignore_failure:
+        err_list = []
+        if error:
+            err_list += [error]
+        err_list += [proc.stdout.strip()]
+        err_list += ['Command line:\n%s' % cmd]
+        raise EmtError('\n'.join(err_list))
+    return proc
 
 def list_rpaths(rootdir, subdir, suffixes=None, prefixes=None):
     """List of the relative paths of the files in rootdir/subdir.
@@ -194,8 +202,8 @@ class GitRepo():
                     set_priv = ['setpriv', '--reuid=%d' % statinfo.st_uid]
                     setgroups = ['--clear-groups', '--regid=%d' %
                                  statinfo.st_gid]
-                    proc = subprocess.run(['setpriv'] + setgroups + ['true'],
-                                          stdout=PIPE, stderr=STDOUT)
+                    proc = run_cmd(['setpriv'] + setgroups + ['true'],
+                                   ignore_failure=True)
                     if proc.returncode == 0:
                         set_priv += setgroups
                     self.root_not_repo_owner = True
@@ -215,12 +223,7 @@ class GitRepo():
         # Check the first commit message.
         cmd = self.git + ['rev-list', '--max-parents=0', '--format=%s',
                           'master', '--']
-        proc = subprocess.run(cmd,
-                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
-        if proc.returncode != 0:
-            raise EmtError('no git repository at %s\n%s\nCommand line:\n%s' %
-                           (self.repodir, proc.stdout.strip(), cmd))
-
+        proc = run_cmd(cmd, error='no git repository at %s' % self.repodir)
         commit, first_commit_msg = proc.stdout.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = ("""\
@@ -252,8 +255,8 @@ class GitRepo():
             raise EmtError(msg)
 
         # Get the initial branch.
-        proc = subprocess.run(self.git + ['symbolic-ref', '--short', 'HEAD'],
-                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        proc = run_cmd(self.git + ['symbolic-ref', '--short', 'HEAD'],
+                       ignore_failure=True)
         if proc.returncode == 0:
             self.initial_branch = proc.stdout.splitlines()[0]
             self.curbranch = self.initial_branch
@@ -268,11 +271,7 @@ class GitRepo():
     def git_cmd(self, cmd):
         if type(cmd) == str:
             cmd = cmd.split()
-        proc = subprocess.run(self.git + cmd,
-                       universal_newlines=True, stdout=PIPE, stderr=STDOUT)
-        if proc.returncode != 0:
-            raise EmtError(proc.stdout)
-
+        proc = run_cmd(self.git + cmd)
         output = proc.stdout.rstrip()
         if self.verbose and output:
             print(output)
@@ -311,9 +310,8 @@ class GitRepo():
             self.commit(commit_msg)
 
     def cherry_pick(self, sha):
-        return subprocess.run(self.git + GIT_USER_CONFIG +
-                    ['cherry-pick', '-x', sha],
-                    universal_newlines=True, stdout=PIPE, stderr=STDOUT)
+        return run_cmd(self.git + GIT_USER_CONFIG +
+                    ['cherry-pick', '-x', sha], ignore_failure=True)
 
     def tracked_files(self, branch):
         """A dictionary of the tracked files in this branch."""
@@ -886,6 +884,8 @@ class EtcMaint():
         Return a dictionary mapping extracted configuration file names to the
         EtcPath instance of the 'original' file before the extraction.
         """
+        import tarfile
+        from concurrent.futures import ThreadPoolExecutor
 
         def etc_files_filter(members):
             for tinfo in members:
