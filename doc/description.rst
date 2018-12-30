@@ -29,6 +29,10 @@ ends in the following cases:
   discarded. The ``master-tmp`` branch and the other temporary branches are
   deleted.
 
+The ``sync`` subcommand is the only command that can be run as root except
+when the repository has been created by root in which case all the commands
+must be run as root.
+
 .. note::
 
    The merge is actually a cherry-pick since only one of the commits made in

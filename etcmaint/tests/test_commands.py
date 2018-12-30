@@ -6,11 +6,14 @@ import io
 import tempfile
 import tarfile
 import time
+import shutil
+import unittest
 from argparse import ArgumentError
 from contextlib import contextmanager, ExitStack
 from textwrap import dedent
 from collections import namedtuple
-from unittest import mock, TestCase, skipIf
+from unittest import TestCase, skipIf
+from unittest.mock import patch
 
 from etcmaint.etcmaint import (ETCMAINT_BRANCHES, change_cwd, etcmaint,
                                ROOT_SUBDIR, EtcPath, EmtError, EtcMaint)
@@ -48,12 +51,53 @@ def captured_output():
         setattr(sys, 'stdout', _stderr)
         strio.close()
 
+# Index of fields returned by os.stat_result().
+ST_UID = ST_GID = None
+
+@contextmanager
+def os_stat_as_root():
+    def stat(path, **kwds):
+        # Members of the StructSequence returned by os.stat are readonly, so
+        # we must build a new one.
+        global ST_UID, ST_GID
+        st = _stat(path, **kwds)
+        if ST_UID is None:
+            # Find the index of both fields when the StructSequence is used as
+            # a sequence by parsing the string representation.
+            st_str = str(st)
+            for fieldname in ('st_uid', 'st_gid'):
+                idx = st_str[:st_str.index(fieldname)].count('=')
+                if fieldname == 'st_uid':
+                    ST_UID = idx
+                else:
+                    ST_GID = idx
+        st_list = list(st)
+        st_list[ST_UID] = 0
+        st_list[ST_GID] = 0
+        return os.stat_result(st_list)
+
+    _stat = getattr(os, 'stat')
+    setattr(os, 'stat', stat)
+    try:
+        yield
+    finally:
+        setattr(os, 'stat', _stat)
+
 def raise_context_of_exit(func, *args, **kwds):
     try:
         func(*args, **kwds)
     except SystemExit as e:
         e = e.__context__ if isinstance(e.__context__, Exception) else e
         raise e from None
+
+_has_setpriv = None
+def skip_unless_setpriv(test):
+    """Skip decorator for tests that require setpriv"""
+    global _has_setpriv
+    if _has_setpriv is None:
+        _has_setpriv = True if shutil.which('setpriv') else False
+    msg = "Requires functional setpriv implementation"
+    return test if _has_setpriv else unittest.skip(msg)(test)
 
 SymLink = namedtuple('SymLink', ['linkto', 'abspath'])
 
@@ -174,7 +218,6 @@ class CommandLineTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
-        os.environ['XDG_DATA_HOME'] = os.path.join(self.tmpdir, REPO_DIR)
 
     def make_base_dirs(self):
         os.makedirs(os.path.join(self.tmpdir, ROOT_DIR, ROOT_SUBDIR))
@@ -191,13 +234,11 @@ class CommandLineTestCase(BaseTestCase):
             self.assertEqual(os.path.isdir(emt.cache_dir), True)
 
     def test_cl_main_help(self):
-        self.make_base_dirs()
         self.run_cmd('help', with_rootdir=False)
         self.assertIn('An Arch Linux tool based on git for the maintenance'
                       ' of /etc files.', self.stdout.getvalue())
 
     def test_cl_create_help(self):
-        self.make_base_dirs()
         self.run_cmd('help', 'create', with_rootdir=False)
         self.assertIn('Create the git repository', self.stdout.getvalue())
 
@@ -207,14 +248,25 @@ class CommandLineTestCase(BaseTestCase):
                                     '--root-dir.*not a directory'):
             raise_context_of_exit(self.run_cmd, 'diff')
 
+    def test_cl_repository_dir(self):
+        with patch('os.getlogin', return_value='root'):
+            from etcmaint.etcmaint import repository_dir
+            self.assertEqual(repository_dir(), '/root/.local/share/etcmaint')
+
+    def test_cl_repository_dir_XDG_DATA_HOME(self):
+        with patch.dict('os.environ', values={'XDG_DATA_HOME': '/tmp'}):
+            from etcmaint.etcmaint import repository_dir
+            self.assertEqual(repository_dir(), '/tmp/etcmaint')
+
     def test_cl_no_repo(self):
         # Check that the repository exists.
         self.make_base_dirs()
-        with self.assertRaisesRegex(EmtError, 'no git repository'):
-            raise_context_of_exit(self.run_cmd, 'diff')
+        with patch('etcmaint.etcmaint.repository_dir',
+                           return_value=os.path.join(self.tmpdir, REPO_DIR)):
+            with self.assertRaisesRegex(EmtError, 'no git repository'):
+                raise_context_of_exit(self.run_cmd, 'diff')
 
     def test_cl_invalid_command(self):
-        self.make_base_dirs()
         with self.assertRaisesRegex(ArgumentError, 'invalid choice'):
             raise_context_of_exit(self.run_cmd, 'foo', with_rootdir=False)
 
@@ -223,7 +275,7 @@ class CommandsTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
-        pre_patch = mock.patch('etcmaint.etcmaint.repository_dir',
+        pre_patch = patch('etcmaint.etcmaint.repository_dir',
                            return_value=os.path.join(self.tmpdir, REPO_DIR))
         self.stack.enter_context(pre_patch)
 
@@ -686,6 +738,37 @@ class UpdateTestCase(CommandsTestCase):
         with self.assertRaisesRegex(EmtError, "Run 'git clean -d -x -f'"):
             self.run_cmd('update')
 
+    def test_update_as_root_owned_by_root(self):
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        files = {'a': 'new content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        with os_stat_as_root(), patch('os.geteuid', return_value=0):
+            self.run_cmd('update')
+        self.check_results([], ['a'])
+        self.check_content('etc', 'a', 'new content')
+
+    @skipIf(os.geteuid() == 0, "non-root user required")
+    @skip_unless_setpriv
+    def test_update_as_root_not_owned_by_root(self):
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        files = {'a': 'new content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        with self.assertRaisesRegex(EmtError, 'cannot be executed as root'):
+            with patch('os.geteuid', return_value=0):
+                self.run_cmd('update')
+
 class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):
         # Sync after a git cherry-pick.
@@ -776,6 +859,19 @@ class SyncTestCase(CommandsTestCase):
         with self.assertRaisesRegex(EmtError,
                           'cannot find a cherry-pick in the etc-tmp branch'):
             self.run_cmd('sync')
+
+    @skipIf(os.geteuid() == 0, "non-root user required")
+    @skip_unless_setpriv
+    def test_plain_sync_as_root_not_owned_by_root(self):
+        # Check that the sync command succeeds when run as root and the
+        # repository is owned by a non-root user.
+        self.simple_cherry_pick()
+        with patch('os.geteuid', return_value=0):
+            self.run_cmd('sync')
+        self.check_simple_cherry_pick('master',
+                                      ['etc', 'master', 'timestamps'])
+        rpath = os.path.join(ROOT_SUBDIR, 'a')
+        self.assertEqual(EtcPath(REPO_DIR, rpath), EtcPath(ROOT_DIR, rpath))
 
 class DiffTestCase(CommandsTestCase):
     def test_diff(self):

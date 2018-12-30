@@ -6,7 +6,7 @@ build-backend = "flit.buildapi"
 module = "etcmaint"
 author = "Xavier de Gaye"
 author-email = "xdegaye@gmail.com"
-home-page = "https://github.com/xdegaye/etcmaint"
+home-page = "https://gitlab.com/xdegaye/etcmaint"
 classifiers = ["Programming Language :: Python :: 3.6", "License :: OSI Approved :: MIT License"]
 requires-python = ">=3.6"
 

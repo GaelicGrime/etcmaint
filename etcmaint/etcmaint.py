@@ -80,9 +80,14 @@ def repository_dir():
     if xdg_data_home is not None:
         return os.path.join(xdg_data_home, 'etcmaint')
 
-    sudo_user = os.environ.get('SUDO_USER')
-    login_name = sudo_user if sudo_user and os.getuid() == 0 else ''
-    return os.path.expanduser('~%s/.local/share/etcmaint' % login_name)
+    try:
+        logname = os.getlogin()
+    except OSError:
+        # Cannot fall back to getpass.getuser() or use the pwd database as
+        # they do not provide the correct value when etcmaint is run with
+        # sudo.
+        raise EmtError('etcmaint requires a controlling terminal')
+    return os.path.expanduser('~%s/.local/share/etcmaint' % logname)
 
 def copy_file(rpath, rootdir, repodir, repo_file=None):
     """Copy a file on 'rootdir' to the repository.
@@ -168,16 +173,35 @@ class GitRepo():
         self.curbranch = None
         self.initial_branch = None
 
-        # When run with sudo, for example with the 'sync' command, force all
-        # git commands to be run as the user who invoked sudo to avoid having
-        # some files created by 'git checkout some_branch' with root ownership
-        # when run as root, that cannot be unlinked later when checking out
-        # another branch as the plain user.
         self.git = []
-        sudo_uid = os.environ.get('SUDO_UID')
-        if os.getuid() == 0 and sudo_uid is not None:
-            self.git.extend(('sudo --user #%s' % sudo_uid).split())
-        self.git.extend(('git -C %s' % repodir).split())
+        self.root_not_repo_owner = False
+        if os.geteuid() == 0:
+            gitdir = os.path.join(repodir, '.git')
+            try:
+                statinfo = os.stat(gitdir)
+            except FileNotFoundError:
+                pass
+            else:
+                # When running as root and the git repository is not owned by
+                # root, then run git commands as the owner of the repository.
+                if statinfo.st_uid != 0:
+                    if shutil.which('setpriv') is None:
+                        raise EmtError('setpriv is missing from the '
+                                       'ArchLinux util-linux package')
+
+                    # Some tests mock os.geteuid() to return 0 and setpriv
+                    # fails when attempting to set groups as a plain user.
+                    set_priv = ['setpriv', '--reuid=%d' % statinfo.st_uid]
+                    setgroups = ['--clear-groups', '--regid=%d' %
+                                 statinfo.st_gid]
+                    proc = subprocess.run(['setpriv'] + setgroups + ['true'],
+                                          stdout=PIPE, stderr=STDOUT)
+                    if proc.returncode == 0:
+                        set_priv += setgroups
+                    self.root_not_repo_owner = True
+                    self.git.extend(set_priv)
+
+        self.git.extend(['git', '-C', repodir])
 
     def create(self):
         """Create the git repository."""
@@ -189,11 +213,14 @@ class GitRepo():
 
     def init(self):
         # Check the first commit message.
-        proc = subprocess.run(self.git + ['rev-list', '--max-parents=0',
-                       '--format=%s', 'master', '--'],
+        cmd = self.git + ['rev-list', '--max-parents=0', '--format=%s',
+                          'master', '--']
+        proc = subprocess.run(cmd,
                        universal_newlines=True, stdout=PIPE, stderr=STDOUT)
         if proc.returncode != 0:
-            raise EmtError('no git repository at %s' % self.repodir)
+            raise EmtError('no git repository at %s\n%s\nCommand line:\n%s' %
+                           (self.repodir, proc.stdout.strip(), cmd))
+
         commit, first_commit_msg = proc.stdout.splitlines()
         if first_commit_msg != FIRST_COMMIT_MSG:
             err_msg = ("""\
@@ -337,9 +364,9 @@ class EtcMaint():
 
     def __init__(self, results):
         self.results = results
-        self.repodir = repository_dir()
 
     def init(self):
+        self.repodir = repository_dir()
         if not hasattr(self, 'verbose'):
             self.verbose = False
         self.repo = GitRepo(self.root_dir, self.repodir, self.verbose)
@@ -379,6 +406,12 @@ class EtcMaint():
         """Run the etcmaint command."""
         self.init()
         method = getattr(self, command)
+
+        # The sync subcommand is the only command that can be run as root
+        # except when the repository has been created by root.
+        if self.repo.root_not_repo_owner and command != 'cmd_sync':
+            raise EmtError('cannot be executed as root')
+
         if command != 'cmd_create':
             self.repo.init()
         try:
@@ -1101,8 +1134,6 @@ def etcmaint(argv):
             func = getattr(sys.modules[__name__], 'dispatch_help')
             func(emt)
         else:
-            if emt.command != 'cmd_sync' and os.getuid() == 0:
-                raise EmtError('cannot be executed as a root user')
             emt.run(emt.command)
     return emt
 

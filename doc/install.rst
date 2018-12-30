@@ -1,6 +1,13 @@
 Installation
 ============
 
+Installation from PyPi
+----------------------
+
+.. note::
+
+   To be completed.
+
 Installation from source
 ------------------------
 
@@ -23,6 +30,12 @@ root of the etcmaint source::
 This will install etcmaint at ~/.local/lib/python3.7/site-packages if the
 current python version is 3.7.
 
+When running the sync subcommand with sudo, the existing user environment must
+be preserved so that python may find the location where etcmaint has been
+installed. So one must run::
+
+  sudo -E etcmaint sync
+
 Run the test suite
 ^^^^^^^^^^^^^^^^^^
 
@@ -44,13 +57,6 @@ doc/_build/man::
 
   sphinx-build -b html doc doc/_build/html
   sphinx-build -b man doc doc/_build/man
-
-Installation from PyPi
-----------------------
-
-.. note::
-
-   To be completed.
 
 .. _`flit`: https://pypi.org/project/flit/
 
