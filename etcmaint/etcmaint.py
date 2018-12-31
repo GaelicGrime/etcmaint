@@ -94,7 +94,7 @@ def repository_dir():
         # Cannot fall back to getpass.getuser() or use the pwd database as
         # they do not provide the correct value when etcmaint is run with
         # sudo.
-        raise EmtError('etcmaint requires a controlling terminal')
+        raise EmtError('etcmaint requires a controlling terminal') from None
     return os.path.expanduser('~%s/.local/share/etcmaint' % logname)
 
 def copy_file(rpath, rootdir, repodir, repo_file=None):
@@ -115,7 +115,7 @@ def copy_file(rpath, rootdir, repodir, repo_file=None):
     if os.path.lexists(repo_file) and (os.path.islink(etc_file) or
                                        os.path.islink(repo_file)):
         os.remove(repo_file)
-    shutil.copy(etc_file, repo_file, follow_symlinks=False)
+    shutil.copy2(etc_file, repo_file, follow_symlinks=False)
 
 @contextlib.contextmanager
 def change_cwd(path):
@@ -579,16 +579,9 @@ class EtcMaint():
                 try:
                     if os.path.islink(path) or os.path.islink(etc_file):
                         os.remove(etc_file)
-                    else:
-                        stat = os.stat(etc_file)
-                    try:
-                        shutil.copy(path, etc_file, follow_symlinks=False)
-                    except OSError as e:
-                        warn(e)
-                    if not os.path.islink(etc_file):
-                        os.chmod(etc_file, stat.st_mode)
+                    shutil.copyfile(path, etc_file, follow_symlinks=False)
                 except OSError as e:
-                    raise EmtError(str(e))
+                    raise EmtError(e) from None
             if print_header:
                 print_header = False
                 print('Files copied from the master-tmp branch to %s:' %
