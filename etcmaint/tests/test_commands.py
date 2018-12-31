@@ -859,6 +859,9 @@ class SyncTestCase(CommandsTestCase):
         self.run_cmd('create')
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
+        self.emt.repo.checkout('master')
+        self.emt.repo.checkout('master-tmp', create=True)
+        self.emt.repo.checkout('etc')
         self.emt.repo.checkout('etc-tmp', create=True)
         with self.assertRaisesRegex(EmtError,
                           'cannot find a cherry-pick in the etc-tmp branch'):
@@ -876,6 +879,14 @@ class SyncTestCase(CommandsTestCase):
                                       ['etc', 'master', 'timestamps'])
         rpath = os.path.join(ROOT_SUBDIR, 'a')
         self.assertEqual(EtcPath(REPO_DIR, rpath), EtcPath(ROOT_DIR, rpath))
+
+    def test_plain_sync_fforward_failure(self):
+        self.simple_cherry_pick()
+        self.emt.repo.checkout('master')
+        files = {'a': 'content'}
+        self.emt.repo.add_files(files, 'commit message')
+        with self.assertRaisesRegex(EmtError, 'cannot fast-forward'):
+            self.run_cmd('sync')
 
 class DiffTestCase(CommandsTestCase):
     def test_diff(self):

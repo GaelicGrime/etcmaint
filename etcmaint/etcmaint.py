@@ -329,6 +329,16 @@ class GitRepo():
                 d[rpath] = EtcPath(self.repodir, rpath)
         return d
 
+    def check_fast_forward(self, branch):
+        """Is a fast-forward merge allowed."""
+        proc = run_cmd(self.git + ['rev-list', '%s-tmp..%s' %
+                                   (branch, branch), '--'])
+        if proc.stdout.strip():
+            # Commits have been made on the main branch since the last update
+            # command.
+            raise EmtError('cannot fast-forward the %s branch, please '
+            'run again the update command' % branch)
+
     @property
     def branches(self):
         branches = self.git_cmd("for-each-ref --format=%(refname:short)")
@@ -425,7 +435,7 @@ class EtcMaint():
         for tmp_branch in ('etc-tmp', 'master-tmp'):
             branch = tmp_branch[:tmp_branch.index('-tmp')]
             rev_list = self.repo.git_cmd(
-                                'rev-list --format=%%b%%n%%s %s...%s' %
+                                'rev-list --format=%%b%%n%%s %s..%s' %
                                 (branch, tmp_branch))
             if not rev_list:
                 continue
@@ -551,8 +561,11 @@ class EtcMaint():
             print(self.mode + 'no file to sync to /etc.')
             return
 
+        for branch in ('master', 'etc'):
+            self.repo.check_fast_forward(branch)
+
         # Find the cherry-pick in the etc-tmp branch.
-        rev_list = self.repo.git_cmd('rev-list --format=%s etc...etc-tmp')
+        rev_list = self.repo.git_cmd('rev-list --format=%s etc..etc-tmp')
         cherry_pick_sha = None
         for line in rev_list.splitlines():
             if line.startswith('commit '):
@@ -617,7 +630,7 @@ class EtcMaint():
                     if branch in ('master', 'etc'):
                         # If there is a merge to be done then tag the branch
                         # before the merge.
-                        if (self.repo.git_cmd('rev-list %s...%s' %
+                        if (self.repo.git_cmd('rev-list %s..%s' %
                                 (branch, tmp_branch))):
                             self.repo.git_cmd('tag -f %s-prev %s' %
                                               (branch, branch))
