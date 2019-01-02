@@ -48,7 +48,7 @@ def captured_output():
         yield strio, _stdout, _stderr
     finally:
         setattr(sys, 'stdout', _stdout)
-        setattr(sys, 'stdout', _stderr)
+        setattr(sys, 'stderr', _stderr)
         strio.close()
 
 # Index of fields returned by os.stat_result().
@@ -182,18 +182,19 @@ class BaseTestCase(TestCase):
         self.addCleanup(self.stack.close)
         self.stdout, self._stdout, self._stderr = self.stack.enter_context(
                                                           captured_output())
+        self.mkdtemp()
+
+    def mkdtemp(self):
         if not debug:
             self.tmpdir = self.stack.enter_context(temp_cwd())
         else:
-            self.tmpdir = tempfile.TemporaryDirectory().name
-            os.makedirs(self.tmpdir)
+            self.tmpdir = tempfile.mkdtemp()
             os.chdir(self.tmpdir)
             print('The temporary test directory %s must be removed manually' %
                   self.tmpdir, file =self._stderr)
-
         self.cmd = Command(self.tmpdir)
 
-    def run_cmd(self, command, *args, with_rootdir=True):
+    def run_cmd(self, command, *args, with_rootdir=True, clear_stdout=True):
         try:
             self.emt = self.cmd.run(command, *args, with_rootdir=with_rootdir)
         finally:
@@ -201,6 +202,8 @@ class BaseTestCase(TestCase):
                 out = self.stdout.getvalue()
                 if out:
                     print(out, file=self._stderr)
+            if clear_stdout:
+                self.clear_stdout()
 
     def clear_stdout(self):
         self.stdout.seek(0)
@@ -218,9 +221,6 @@ class BaseTestCase(TestCase):
 class CommandLineTestCase(BaseTestCase):
     """Test the command line."""
 
-    def setUp(self):
-        super().setUp()
-
     def make_base_dirs(self):
         os.makedirs(os.path.join(self.tmpdir, ROOT_DIR, ROOT_SUBDIR))
         os.makedirs(os.path.join(self.tmpdir, CACHE_DIR))
@@ -236,12 +236,33 @@ class CommandLineTestCase(BaseTestCase):
             self.assertEqual(os.path.isdir(emt.cache_dir), True)
 
     def test_cl_main_help(self):
-        self.run_cmd('help', with_rootdir=False)
+        self.run_cmd('help', with_rootdir=False, clear_stdout=False)
         self.assertIn('An Arch Linux tool based on git for the maintenance'
                       ' of /etc files.', self.stdout.getvalue())
 
+    def test_cl_main_help_debug(self):
+        global debug
+        try:
+            debug = 1
+            _stderr = self._stderr
+            self._stderr = io.StringIO()
+            self.mkdtemp()
+            print('debug info')
+            self.test_cl_main_help()
+        finally:
+            debug = 0
+            out = self._stderr.getvalue()
+            self._stderr.close()
+            self._stderr = _stderr
+            shutil.rmtree(self.tmpdir)
+        self.assertIn('debug info', out)
+        self.assertIn('temporary test directory %s must be removed' %
+                      self.tmpdir, out)
+        self.assertIn('An Arch Linux tool based on git for the maintenance'
+                  ' of /etc files.', out)
+
     def test_cl_create_help(self):
-        self.run_cmd('help', 'create', with_rootdir=False)
+        self.run_cmd('help', 'create', with_rootdir=False, clear_stdout=False)
         self.assertIn('Create the git repository', self.stdout.getvalue())
 
     def test_cl_not_a_dir(self):
@@ -260,13 +281,38 @@ class CommandLineTestCase(BaseTestCase):
             from etcmaint.etcmaint import repository_dir
             self.assertEqual(repository_dir(), '/tmp/etcmaint')
 
+    def test_cl_no_command(self):
+        import etcmaint.etcmaint
+        try:
+            _argv = getattr(sys, 'argv')
+            setattr(sys, 'argv', ['etcmaint'])
+            with self.assertRaisesRegex(SystemExit, '2'):
+                etcmaint.etcmaint.main()
+        finally:
+            setattr(sys, 'argv', _argv)
+        self.assertIn('a command is required', self.stdout.getvalue())
+
     def test_cl_no_repo(self):
         # Check that the repository exists.
         self.make_base_dirs()
         with patch('etcmaint.etcmaint.repository_dir',
                            return_value=os.path.join(self.tmpdir, REPO_DIR)):
             with self.assertRaisesRegex(EmtError, 'no git repository'):
-                raise_context_of_exit(self.run_cmd, 'diff')
+                self.run_cmd('diff')
+
+    def test_cl_no_repo_using_main(self):
+        # Check that the repository exists.
+        self.make_base_dirs()
+        with patch('etcmaint.etcmaint.repository_dir',
+                           return_value=os.path.join(self.tmpdir, REPO_DIR)):
+            import etcmaint.etcmaint
+            try:
+                _argv = getattr(sys, 'argv')
+                setattr(sys, 'argv', ['etcmaint', 'diff'])
+                with self.assertRaisesRegex(EmtError, 'no git repository'):
+                    raise_context_of_exit(etcmaint.etcmaint.main)
+            finally:
+                setattr(sys, 'argv', _argv)
 
     def test_cl_invalid_command(self):
         with self.assertRaisesRegex(ArgumentError, 'invalid choice'):
@@ -362,6 +408,17 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create', '--aur-dir', AUR_DIR)
         self.check_results([], ['a', 'b'])
 
+    def test_create_not_readable(self):
+        files = {'a': 'a content', 'b': 'b content'}
+        self.cmd.add_etc_files(files)
+        path = os.path.join(self.cmd.root_dir, ROOT_SUBDIR, 'b')
+        os.chmod(path, 0)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create', clear_stdout=False)
+        self.check_results([], ['a'])
+        out = self.stdout.getvalue()
+        self.assertIn('skip %s, file is not readable' % path, out)
+
     def test_create_symlink_abspath(self):
         files = {'a': 'content', 'b': SymLink('a', True)}
         self.cmd.add_etc_files(files)
@@ -402,15 +459,16 @@ class CreateTestCase(CommandsTestCase):
 
     def test_create_newest_package(self):
         # Check that the newest package file is used.
-        files = {'a': 'newest release X'}
-        self.cmd.add_package('package', files, release='X')
+        def create_package(release, add_etc=False, delta_mtime=0):
+            files = {'a': 'release %s' % release}
+            if add_etc:
+                self.cmd.add_etc_files(files)
+            self.cmd.add_package('package', files, release=release,
+                                 delta_mtime=delta_mtime)
 
-        files['a'] = 'oldest release Y'
-        self.cmd.add_etc_files(files)
+        create_package('X')
         # Create the package in the past.
-        pkg_a = self.cmd.add_package('package', files, release='Y',
-                                     delta_mtime=-3600)
-
+        create_package('Y', add_etc=True, delta_mtime=-3600)
         self.run_cmd('create')
         self.assertNotIn('package-1.0-Y',
                         ('-'.join(p.rsplit('-', maxsplit=3)[:3]) for
@@ -419,8 +477,17 @@ class CreateTestCase(CommandsTestCase):
         # The oldest release file is in master: it is the content of the /etc
         # file which differs from the content of the newest release (and
         # pacman would have written a pacnew file).
-        self.check_content('master', 'a', 'oldest release Y')
-        self.check_content('etc', 'a', 'newest release X')
+        self.check_content('master', 'a', 'release Y')
+        self.check_content('etc', 'a', 'release X')
+
+        # Remove previous packages and check that an old package is not
+        # updated.
+        cachedir = os.path.join(self.tmpdir, CACHE_DIR)
+        shutil.rmtree(cachedir)
+        os.makedirs(cachedir)
+        create_package('Z', delta_mtime=-3600)
+        self.run_cmd('update')
+        self.assertFalse(hasattr(self.emt, 'new_packages'))
 
     def test_create_exclude_packages(self):
         files = {'a': 'a content', 'b': 'b content', 'c': 'c content'}
@@ -428,7 +495,8 @@ class CreateTestCase(CommandsTestCase):
         pkg_a = self.cmd.add_package('a_package', {'a': 'a content'})
         pkg_b = self.cmd.add_package('b_package', {'b': 'b content'})
         pkg_c = self.cmd.add_package('c_package', {'c': 'c content'})
-        self.run_cmd('create', '--exclude-pkgs', 'foo, b_, bar')
+        self.run_cmd('create', '--exclude-pkgs', 'foo, b_, bar',
+                     clear_stdout=False)
         self.check_results([], ['a', 'c'])
         out = self.stdout.getvalue()
         self.assertIn('scanned %s' % os.path.basename(pkg_a), out)
@@ -441,6 +509,16 @@ class CreateTestCase(CommandsTestCase):
         self.cmd.add_package('package', files)
         self.run_cmd('create', '--exclude-files', 'foo, b, bar')
         self.check_results([], ['a', 'bbb'])
+
+    def test_create_repo_not_empty(self):
+        repo_dir = os.path.join(self.tmpdir, REPO_DIR)
+        os.makedirs(os.path.join(repo_dir, 'some_dir'))
+        # Create the cache and root directories.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        with self.assertRaisesRegex(EmtError, '%s is not empty' % repo_dir):
+            self.run_cmd('create')
 
 class UpdateTestCase(CommandsTestCase):
     def test_update_plain(self):
@@ -541,8 +619,7 @@ class UpdateTestCase(CommandsTestCase):
         self.cmd.add_etc_files(files)
         pkg_b = self.cmd.add_package('package_b', files)
 
-        self.clear_stdout()
-        self.run_cmd('update')
+        self.run_cmd('update', clear_stdout=False)
         self.check_results([], ['a', 'b'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'b', 'b content')
         self.check_output(is_in='scanned %s' % os.path.basename(pkg_b),
@@ -682,6 +759,31 @@ class UpdateTestCase(CommandsTestCase):
         self.check_curbranch('master-tmp')
         self.check_status(['UU %s/a' % ROOT_SUBDIR])
 
+    def test_update_cherry_pick_no_master(self):
+        # Check an upgrade with a cherry-pick when there is no corresponding
+        # file in master. This happens after a user change in the /etc file
+        # and the next upgrade causes a cherry-pick.
+        content = ['line %d' % n for n in range(5)]
+        files = {'a': '\n'.join(content)}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_results([], ['a'])
+
+        etc_content = content[:]; etc_content[0] = '/etc line 0'
+        self.cmd.add_etc_files({'a': '\n'.join(etc_content)})
+
+        pkg_content = content[:]; pkg_content[4] = 'package line 4'
+        self.cmd.add_package('package', {'a': '\n'.join(pkg_content)})
+        self.run_cmd('update')
+        self.check_results([], ['a'], ETCMAINT_BRANCHES)
+        self.check_content('master-tmp', 'a', dedent("""\
+                                               /etc line 0
+                                               line 1
+                                               line 2
+                                               line 3
+                                               package line 4"""))
+
     def test_update_new_package(self):
         # Check that a package is updated with a new release.
         files = {'a': 'initial content'}
@@ -772,6 +874,23 @@ class UpdateTestCase(CommandsTestCase):
         with self.assertRaisesRegex(EmtError, 'cannot be executed as root'):
             with patch('os.geteuid', return_value=0):
                 self.run_cmd('update')
+
+    def test_update_not_etcmaint_repo(self):
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        try:
+            import etcmaint.etcmaint
+            _fist_commit = etcmaint.etcmaint.FIRST_COMMIT_MSG
+            etcmaint.etcmaint.FIRST_COMMIT_MSG = 'not an etcmaint repository'
+            self.run_cmd('create')
+        finally:
+            etcmaint.etcmaint.FIRST_COMMIT_MSG = _fist_commit
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
+
+        with self.assertRaisesRegex(EmtError,
+                                    'this is not an etcmaint repository'):
+            self.run_cmd('update')
 
 class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):
@@ -898,9 +1017,23 @@ class DiffTestCase(CommandsTestCase):
         self.check_content('master', 'a', 'content of a')
         self.check_content('etc', 'a', 'package content')
 
-        self.run_cmd('diff')
+        self.run_cmd('diff', clear_stdout=False)
         self.check_output(is_in='\n'.join(os.path.join(ROOT_SUBDIR, x)
-                               for x in ['b', 'c']))
+                               for x in ['b', 'c']),
+                               is_notin=os.path.join(ROOT_SUBDIR, 'a'))
+
+    def test_diff_exclude_suffixes(self):
+        files = {f: 'content of %s' % f for f in ('a', 'b', 'c')}
+        files['b.pacnew'] = 'content of b.pacnew'
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', {'a': 'package content'})
+        self.run_cmd('create')
+        self.check_results(['a'], ['a'], ['etc', 'master', 'timestamps'])
+
+        self.run_cmd('diff', clear_stdout=False)
+        self.check_output(is_in='\n'.join(os.path.join(ROOT_SUBDIR, x)
+                               for x in ['b', 'c']),
+                               is_notin=os.path.join(ROOT_SUBDIR, 'b.pacnew'))
 
     def test_diff_exclude_prefixes(self):
         files = {f: 'content of %s' % f for f in
@@ -912,7 +1045,8 @@ class DiffTestCase(CommandsTestCase):
         self.check_content('master', 'a_file', 'content of a_file')
         self.check_content('etc', 'a_file', 'package content')
 
-        self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar')
+        self.run_cmd('diff', '--exclude-prefixes', 'foo, b_, bar',
+                     clear_stdout=False)
         self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'c_file'),
                                is_notin=os.path.join(ROOT_SUBDIR, 'b_file'))
 
@@ -922,7 +1056,7 @@ class DiffTestCase(CommandsTestCase):
         self.cmd.add_package('package', files)
         self.run_cmd('create')
 
-        self.run_cmd('diff', '--use-etc-tmp')
+        self.run_cmd('diff', '--use-etc-tmp', clear_stdout=False)
         self.assertIn('The etc-tmp branch does not exist',
                       self.stdout.getvalue())
 
@@ -944,10 +1078,9 @@ class DiffTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['a'], ETCMAINT_BRANCHES)
 
-        self.clear_stdout()
-        self.run_cmd('diff')
+        self.run_cmd('diff', clear_stdout=False)
         self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'b'))
-
         self.clear_stdout()
-        self.run_cmd('diff', '--use-etc-tmp')
+
+        self.run_cmd('diff', '--use-etc-tmp', clear_stdout=False)
         self.check_output(equal='\n')

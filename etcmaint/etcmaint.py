@@ -66,8 +66,6 @@ def list_rpaths(rootdir, subdir, suffixes=None, prefixes=None):
         for root, dirs, files in os.walk('.'):
             for fname in files:
                 rpath = os.path.normpath(os.path.join(root, fname))
-                if os.path.isdir(rpath):
-                    continue
                 # Exclude files ending with one of the suffixes.
                 if suffixes_len:
                     if (len(list(itertools.takewhile(lambda x: not x or
@@ -180,6 +178,7 @@ class GitRepo():
         self.verbose = verbose
         self.curbranch = None
         self.initial_branch = None
+        self.initialized = False
 
         self.git = []
         self.root_not_repo_owner = False
@@ -213,11 +212,13 @@ class GitRepo():
 
     def create(self):
         """Create the git repository."""
-        if os.path.isdir(self.repodir) and os.listdir(self.repodir):
-            raise EmtError('%s is not empty' % self.repodir)
-        if not os.path.isdir(self.repodir):
+        if os.path.isdir(self.repodir):
+            if os.listdir(self.repodir):
+                raise EmtError('%s is not empty' % self.repodir)
+        else:
             os.makedirs(self.repodir)
         self.git_cmd('init')
+        self.initialized = True
 
     def init(self):
         # Check the first commit message.
@@ -260,13 +261,15 @@ class GitRepo():
         if proc.returncode == 0:
             self.initial_branch = proc.stdout.splitlines()[0]
             self.curbranch = self.initial_branch
+        self.initialized = True
 
     def close(self):
-        branch = 'master'
-        if self.initial_branch in self.branches:
-            branch = self.initial_branch
-        if not self.get_status():
-            self.checkout(branch)
+        if self.initialized:
+            branch = 'master'
+            if self.initial_branch in self.branches:
+                branch = self.initial_branch
+            if not self.get_status():
+                self.checkout(branch)
 
     def git_cmd(self, cmd):
         if type(cmd) == str:
@@ -479,7 +482,7 @@ class EtcMaint():
         self.repo.checkout('master')
         self.repo.init()
         self.update_repository()
-        print('Git repository created at %s.' % self.repodir)
+        print('Git repository created at %s' % self.repodir)
 
     def cmd_update(self):
         """Update the repository with packages and user changes.
@@ -558,7 +561,7 @@ class EtcMaint():
         value.
         """
         if not 'etc-tmp' in self.repo.branches:
-            print(self.mode + 'no file to sync to /etc.')
+            print(self.mode + 'no file to sync to /etc')
             return
 
         for branch in ('master', 'etc'):
@@ -667,10 +670,10 @@ class EtcMaint():
         for rpath in self.etc_commits.cherry_pick.rpaths:
             repo_file = os.path.join(self.repodir, rpath)
             if not os.path.isfile(repo_file):
-                warn('cherry picking %s to the master-tmp branch but this'
-                     ' file does not exist' % rpath)
+                assert False, ('cherry picking %s to the master-tmp branch'
+                               ' but this file does not exist' % rpath)
 
-        # Use a temporary branch for the cherry-pick.
+        # Use first a temporary branch for the cherry-pick.
         try:
             self.repo.checkout('cherry-pick', create=True)
             proc = self.repo.cherry_pick(cherry_pick_sha)
@@ -683,12 +686,12 @@ class EtcMaint():
                 conflicts = [x[3:] for x in self.repo.get_status()
                              if 'U' in x[:2]]
                 if conflicts:
+                    assert os.path.exists(os.path.join(self.repodir,
+                                          '.git', 'CHERRY_PICK_HEAD'))
                     self.repo.git_cmd('cherry-pick --abort')
                 else:
                     self.repo.git_cmd('reset --hard HEAD')
-                    err = proc.stdout
-                    err += 'etcmaint internal error: no conflicts found'
-                    raise EmtError(err)
+                    raise EmtError(proc.stdout)
         finally:
             self.repo.checkout('master-tmp')
             self.repo.git_cmd('branch -D cherry-pick')
@@ -847,6 +850,8 @@ class EtcMaint():
                 if not fullname.endswith('.pkg.tar.xz'):
                     continue
 
+                # "Version tags may not include hyphens!" quoting from
+                # https://wiki.archlinux.org/index.php/Arch_package_guidelines
                 name, *remain = fullname.rsplit('-', maxsplit=3)
                 if len(remain) != 3:
                     warn('ignoring incorrect package name: %s' % fullname)
@@ -964,8 +969,8 @@ class EtcMaint():
         case 2: original=X, current=X, new=Y     current=Y, new=Y
         case 3: original=X, current=Y, new=X     unchanged
         case 4: original=X, current=Y, new=Y     unchanged
-        case 5: original=X, current=Y, new=Z     user must merge new
-                                                 into current
+        case 5: original=X, current=Y, new=Z     cherry-pick changes between
+                                                 new and current into master
         case 6: original=NULL, current=Y, new=Z  idem
         """
 
