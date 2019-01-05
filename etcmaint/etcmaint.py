@@ -172,10 +172,9 @@ class EtcPath():
 class GitRepo():
     """A git repository."""
 
-    def __init__(self, root_dir, repodir, verbose):
+    def __init__(self, root_dir, repodir):
         self.root_dir = root_dir
         self.repodir = repodir.rstrip(os.sep)
-        self.verbose = verbose
         self.curbranch = None
         self.initial_branch = None
         self.initialized = False
@@ -276,8 +275,6 @@ class GitRepo():
             cmd = cmd.split()
         proc = run_cmd(self.git + cmd)
         output = proc.stdout.rstrip()
-        if self.verbose and output:
-            print(output)
         return output
 
     def get_status(self):
@@ -378,9 +375,7 @@ class EtcMaint():
 
     def init(self):
         self.repodir = repository_dir()
-        if not hasattr(self, 'verbose'):
-            self.verbose = False
-        self.repo = GitRepo(self.root_dir, self.repodir, self.verbose)
+        self.repo = GitRepo(self.root_dir, self.repodir)
 
         if not hasattr(self, 'dry_run'):
             self.dry_run = False
@@ -415,6 +410,8 @@ class EtcMaint():
 
     def run(self, command):
         """Run the etcmaint command."""
+        assert command.startswith('cmd_')
+        self.cmd = command[4:]
         self.init()
         method = getattr(self, command)
 
@@ -907,7 +904,7 @@ class EtcMaint():
                     yield tinfo
 
         def extract_from(pkg):
-            tar = tarfile.open(str(pkg), mode='r:xz', debug=1)
+            tar = tarfile.open(str(pkg), mode='r:xz')
             tarinfos = list(etc_files_filter(tar.getmembers()))
             for tinfo in tarinfos:
                 path = EtcPath(self.repodir, tinfo.name)
@@ -927,9 +924,10 @@ class EtcMaint():
                     except OSError as err:
                         warn(err)
             tar.extractall(self.repodir, members=tarinfos)
-            print('scanned', pkg.name)
+            print(pkg.name)
 
         extracted = {}
+        print('Extracting configuration files from packages')
         max_workers = len(os.sched_getaffinity(0)) or 4
         # Extracting from tarfiles is not thread safe (see msg315067 in bpo
         # issue https://bugs.python.org/issue23649).
@@ -997,9 +995,13 @@ class EtcMaint():
                 except PermissionError:
                     pass
                 if not exists:
-                    warn('skip %s, file does not exist' % path)
+                    # Do not warn on 'create' subcommand to avoid the noise of
+                    # all the /etc files removed after packages removal while
+                    # their package file is still present in pacman CacheDir.
+                    if self.cmd != 'create':
+                        warn('skip %s does not exist' % path)
                 else:
-                    warn('skip %s, file is not readable' % path)
+                    warn('skip %s not readable' % path)
                 continue
 
             # A new package has been installed.
@@ -1096,9 +1098,6 @@ def parse_args(argv, namespace):
                 ' with no changes made (default: %(default)s)',
                 action='store_true', default=False)
         if cmd in ('create', 'update'):
-            parser.add_argument('--verbose', '-v', help='Print the output of'
-                ' the git commands (default: %(default)s)',
-                action='store_true', default=False)
             parser.add_argument('--cache-dir', help='Set pacman cache'
                 ' directory (override the /etc/pacman.conf setting of the'
                 ' CacheDir option)', type=isdir)

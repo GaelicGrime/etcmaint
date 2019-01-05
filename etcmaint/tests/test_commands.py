@@ -417,7 +417,7 @@ class CreateTestCase(CommandsTestCase):
         self.run_cmd('create', clear_stdout=False)
         self.check_results([], ['a'])
         out = self.stdout.getvalue()
-        self.assertIn('skip %s, file is not readable' % path, out)
+        self.assertIn('skip %s not readable' % path, out)
 
     def test_create_symlink_abspath(self):
         files = {'a': 'content', 'b': SymLink('a', True)}
@@ -499,9 +499,9 @@ class CreateTestCase(CommandsTestCase):
                      clear_stdout=False)
         self.check_results([], ['a', 'c'])
         out = self.stdout.getvalue()
-        self.assertIn('scanned %s' % os.path.basename(pkg_a), out)
-        self.assertNotIn('scanned %s' % os.path.basename(pkg_b), out)
-        self.assertIn('scanned %s' % os.path.basename(pkg_c), out)
+        self.assertIn(os.path.basename(pkg_a), out)
+        self.assertNotIn(os.path.basename(pkg_b), out)
+        self.assertIn(os.path.basename(pkg_c), out)
 
     def test_create_exclude_files(self):
         files = {'a': 'a content', 'b': 'b content', 'bbb': 'bbb content'}
@@ -622,8 +622,8 @@ class UpdateTestCase(CommandsTestCase):
         self.run_cmd('update', clear_stdout=False)
         self.check_results([], ['a', 'b'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'b', 'b content')
-        self.check_output(is_in='scanned %s' % os.path.basename(pkg_b),
-                           is_notin='scanned %s' % os.path.basename(pkg_a))
+        self.check_output(is_in=os.path.basename(pkg_b),
+                           is_notin=os.path.basename(pkg_a))
 
     def test_update_dry_run(self):
         # Check that two consecutive updates in dry-run mode give the same

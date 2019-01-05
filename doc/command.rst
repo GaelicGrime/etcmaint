@@ -41,10 +41,6 @@ Options
 
 .. program:: etcmaint create
 
-.. option:: --verbose, -v
-
-   Print the output of the Git commands (default: False)
-
 .. option:: --cache-dir CACHE_DIR
 
    Set pacman cache directory (override the /etc/pacman.conf setting of the
