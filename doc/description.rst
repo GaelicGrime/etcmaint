@@ -80,11 +80,11 @@ previous session. The name of the tag is composed of the name of the
 corresponding branch suffixed with ``-prev``. For example, to see the last
 changes made in ``master``::
 
-  git diff master-prev...master
+  $ git diff master-prev...master
 
 To list the names of the files that have been changed::
 
-  git diff --name-only master-prev...master
+  $ git diff --name-only master-prev...master
 
 Commit messages
 ---------------
@@ -150,8 +150,8 @@ Caveats:
 * etcmaint does not handle the files or symlinks created in the /etc directory
   by `pacman`_ post-install and post_upgrade steps.
 
-.. _`pacman`: https://www.archlinux.org/pacman/pacman.8.html
-.. _`pacman.conf`: https://www.archlinux.org/pacman/pacman.conf.5.html
+.. _pacman: https://www.archlinux.org/pacman/pacman.8.html
+.. _pacman.conf: https://www.archlinux.org/pacman/pacman.conf.5.html
 .. _`Git configuration`: https://wiki.archlinux.org/index.php/git#Configuration
 
 .. vim:sts=2:sw=2:tw=78

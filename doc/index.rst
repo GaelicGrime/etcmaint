@@ -3,23 +3,19 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Features
-========
-
 .. include:: ../README.rst
-
 
 .. toctree::
    :hidden:
    :caption: Table of content
    :maxdepth: 2
 
-   self
-   install
+   Home <self>
    description
    The etcmaint command <command>
    conflict
    development
-   Source code <https://gitlab.com/xdegaye/etcmaint>
+   history
+   Repository <https://gitlab.com/xdegaye/etcmaint>
 
 .. vim:sts=2:sw=2:tw=78

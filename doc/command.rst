@@ -4,9 +4,7 @@ etcmaint
 Synopsis
 --------
 
-**etcmaint** {*help,create,update,sync,diff*} [*options*]
-
-**etcmaint** [*--version*]
+**etcmaint** [*--version*] {*help,create,update,sync,diff*} [*options*]
 
 Description
 -----------
@@ -82,9 +80,9 @@ temporary branches deleted. The operation is then complete and the changes can
 be examined with the Git diff command run on the differences between the Git
 tag set at the previous 'update' command, named '<branch name>-prev', and the
 branch itself. For example, to list the names of the files that have been
-changed in the master branch:
+changed in the master branch::
 
-    ``git diff --name-only master-prev...master``
+  $ git diff --name-only master-prev...master
 
 Otherwise the fast-forwarding is postponed until the 'sync' command is run and
 until then it is still possible to start over with a new 'update' command, the
@@ -92,9 +90,9 @@ previous temporary branches being discarded in that case. To examine the
 changes that will be merged into each branch by the 'sync' command, use the
 Git diff command run on the differences between the branch itself and the
 corresponding temporary branch. For example, to list all the changes that will
-be made by the 'sync' command to the master branch:
+be made by the 'sync' command to the master branch::
 
-    ``git diff master...master-tmp``
+  $ git diff master...master-tmp
 
 Options
 """""""
@@ -114,15 +112,15 @@ Description
 update command.
 
 To print the changes that are going to be made to /etc by the 'sync' command,
-first print the list of files that will be copied:
+first print the list of files that will be copied::
 
-    ``etcmaint sync --dry-run``
+  $ etcmaint sync --dry-run
 
 Then for each file in the list, run the following git command where 'rpath' is
 the relative path name as output by the previous command and that starts with
-'etc/':
+'etc/'::
 
-    ``git diff master...master-tmp -- rpath``
+  $ git diff master...master-tmp -- rpath
 
 This command must be run as root when using the --root-dir default value.
 

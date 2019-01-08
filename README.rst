@@ -20,12 +20,28 @@
 * The changes in the current etcmaint session before finalization can be
   printed with::
 
-    git diff master...master-tmp
+    $ git diff master...master-tmp
+
+Install
+-------
+
+Install etcmaint from `PyPi`_::
+
+  $ python -m pip install etcmaint
+
+Usage
+-----
+
+::
+
+  $ etcmaint [--version] {help,create,update,sync,diff} [options]
 
 Documentation at `GitLab Pages`_.
 
-.. _`pacman`: https://www.archlinux.org/pacman/pacman.8.html
+.. _pacman: https://www.archlinux.org/pacman/pacman.8.html
 .. _`Handling Config Files`: https://www.archlinux.org/pacman/pacman.8.html#_handling_config_files_a_id_hcf_a
+.. _PyPi: https://pypi.org/project/etcmaint/
 .. _`GitLab Pages`: https://xdegaye.gitlab.io/etcmaint/
+
 
 .. vim:sts=2:sw=2:tw=78

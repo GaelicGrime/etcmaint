@@ -19,14 +19,14 @@ Initial setup
 
 * Configure Git with gvim as the text editor for use by Git commands::
 
-    git config --global core.editor 'gvim -f'
+    $ git config --global core.editor 'gvim -f'
 
 * Configure Git with gvim as the merge tool::
 
-    git config --global --add merge.tool vim-mergetool
-    git config --global --add mergetool.keepBackup  false
-    git config --global --add mergetool.vim-mergetool.trustExitCode true
-    git config --global --add mergetool.vim-mergetool.cmd \
+    $ git config --global --add merge.tool vim-mergetool
+    $ git config --global --add mergetool.keepBackup  false
+    $ git config --global --add mergetool.vim-mergetool.trustExitCode true
+    $ git config --global --add mergetool.vim-mergetool.cmd \
         'gvim -f -d -M -c "set modifiable write noreadonly" $MERGED $LOCAL $REMOTE $BASE'
 
 .. _conflict-resolution:

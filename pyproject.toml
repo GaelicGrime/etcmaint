@@ -7,8 +7,17 @@ module = "etcmaint"
 author = "Xavier de Gaye"
 author-email = "xdegaye@gmail.com"
 home-page = "https://gitlab.com/xdegaye/etcmaint"
-classifiers = ["Programming Language :: Python :: 3.6", "License :: OSI Approved :: MIT License"]
+description-file="README.rst"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Software Distribution",
+    ]
 requires-python = ">=3.6"
+keywords = "ArchLinux pacman"
+
+[tool.flit.metadata.urls]
+Documentation = "https://xdegaye.gitlab.io/etcmaint/"
 
 [tool.flit.scripts]
 etcmaint = "etcmaint.etcmaint:main"
