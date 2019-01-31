@@ -143,31 +143,33 @@ class EtcPath():
         assert rpath.startswith(ROOT_SUBDIR)
         self.path = pathlib.PosixPath(basedir, rpath)
         self._digest = None
-        try:
-            self.is_symlink = self.path.is_symlink()
-        except OSError:
-            self._digest = b''
 
     @property
     def digest(self):
         if self._digest is None:
             try:
-                if self.is_symlink:
-                    # The digest is the path to which the symbolic link
-                    # points.
-                    self._digest = os.readlink(self.path)
-                else:
-                    h = hashlib.sha1()
-                    with self.path.open('rb') as f:
-                        h.update(f.read())
-                    self._digest = h.digest()
-            except OSError:
+                self.st_mode = self.path.lstat().st_mode
+            except FileNotFoundError:
+                self.st_mode = None
                 self._digest = b''
+            else:
+                try:
+                    if stat.S_ISLNK(self.st_mode):
+                        # The digest is the path to which the symbolic link
+                        # points.
+                        self._digest = os.readlink(self.path)
+                    else:
+                        h = hashlib.sha1()
+                        with self.path.open('rb') as f:
+                            h.update(f.read())
+                        self._digest = h.digest()
+                except OSError:
+                    self._digest = b''
         return self._digest
 
     def __eq__(self, other):
         return (isinstance(other, EtcPath) and self.digest == other.digest and
-                self.digest != b'')
+                self.digest != b'' and self.st_mode == other.st_mode)
 
 class GitRepo():
     """A git repository."""

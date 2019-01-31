@@ -3,6 +3,7 @@
 import sys
 import os
 import io
+import stat
 import tempfile
 import tarfile
 import time
@@ -115,7 +116,7 @@ class Command():
         self.cache_dir = os.path.join(self.tmpdir, CACHE_DIR)
         self.root_dir = os.path.join(self.tmpdir, ROOT_DIR)
 
-    def add_files(self, files, dir_path=''):
+    def add_files(self, files, fmodes={}, dir_path=''):
         """'files' dictionary of file names mapped to content or SymLink."""
         for fname in files:
             path = os.path.join(dir_path, ROOT_SUBDIR, fname)
@@ -134,10 +135,14 @@ class Command():
                 with open(path, 'w') as f:
                     f.write(val)
 
-    def add_etc_files(self, files):
-        self.add_files(files, self.root_dir)
+            if fname in fmodes:
+                st_mode = os.stat(path).st_mode
+                os.chmod(path, st_mode | fmodes[fname])
 
-    def add_package(self, name, files, version='1.0', release='1',
+    def add_etc_files(self, files, fmodes={}):
+        self.add_files(files, fmodes=fmodes, dir_path=self.root_dir)
+
+    def add_package(self, name, files, fmodes={}, version='1.0', release='1',
                     cache_dir=None, delta_mtime=None):
         """Add a package."""
         cache_dir = self.cache_dir if cache_dir is None else cache_dir
@@ -146,7 +151,7 @@ class Command():
         pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
                                 (name, version, release, os.uname().machine))
         with temp_cwd():
-            self.add_files(files)
+            self.add_files(files, fmodes=fmodes)
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
@@ -535,6 +540,25 @@ class UpdateTestCase(CommandsTestCase):
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
         self.check_content('etc', 'a', 'new content')
 
+    def test_update_file_mode(self):
+        # Check that a file is updated in the etc branch when its mode has
+        # been modified in a new package.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_content('etc', 'a', 'content')
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
+
+        fmodes = {'a': stat.S_IXUSR}
+        self.cmd.add_etc_files(files, fmodes=fmodes)
+        self.cmd.add_package('package', files, fmodes=fmodes)
+        self.run_cmd('update', clear_stdout=False)
+        self.check_output(is_in='Commits in the etc branch')
+        self.check_output(is_in='Files added or updated from new package'
+                                ' versions')
+        self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'a'))
+
     def test_update_etc_removed(self):
         # Remove 'b' /etc file and it is removed from the etc branch on
         # 'update'.
@@ -827,7 +851,7 @@ class UpdateTestCase(CommandsTestCase):
         self.check_results(['a'], ['a'])
 
         files['a'] = 'changed content in tracked file'
-        self.cmd.add_files(files, self.emt.repodir)
+        self.cmd.add_files(files, dir_path=self.emt.repodir)
         with self.assertRaisesRegex(EmtError, "Run 'git reset --hard'"):
             self.run_cmd('update')
 
@@ -840,7 +864,7 @@ class UpdateTestCase(CommandsTestCase):
         self.check_results([], ['a'])
 
         files = {'b': 'content of untracked file'}
-        self.cmd.add_files(files, self.emt.repodir)
+        self.cmd.add_files(files, dir_path=self.emt.repodir)
         with self.assertRaisesRegex(EmtError, "Run 'git clean -d -x -f'"):
             self.run_cmd('update')
 
