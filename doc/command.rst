@@ -100,7 +100,11 @@ Options
 .. program:: etcmaint update
 
 The ``update`` subcommand options are the same as the ``create`` subcommand
-options.
+options plus the ``dry-run`` option.
+
+.. option:: --dry-run, -n
+
+   Perform a trial run with no changes made (default: False)
 
 sync
 ^^^^
