@@ -116,7 +116,7 @@ class Command():
         self.cache_dir = os.path.join(self.tmpdir, CACHE_DIR)
         self.root_dir = os.path.join(self.tmpdir, ROOT_DIR)
 
-    def add_files(self, files, fmodes={}, dir_path=''):
+    def add_files(self, files, or_modes={}, and_modes={}, dir_path=''):
         """'files' dictionary of file names mapped to content or SymLink."""
         for fname in files:
             path = os.path.join(dir_path, ROOT_SUBDIR, fname)
@@ -135,15 +135,20 @@ class Command():
                 with open(path, 'w') as f:
                     f.write(val)
 
-            if fname in fmodes:
+            if fname in or_modes:
                 st_mode = os.stat(path).st_mode
-                os.chmod(path, st_mode | fmodes[fname])
+                os.chmod(path, st_mode | or_modes[fname])
 
-    def add_etc_files(self, files, fmodes={}):
-        self.add_files(files, fmodes=fmodes, dir_path=self.root_dir)
+            if fname in and_modes:
+                st_mode = os.stat(path).st_mode
+                os.chmod(path, st_mode & and_modes[fname])
 
-    def add_package(self, name, files, fmodes={}, version='1.0', release='1',
-                    cache_dir=None, delta_mtime=None):
+    def add_etc_files(self, files, or_modes={}, and_modes={}):
+        self.add_files(files, or_modes=or_modes, and_modes=and_modes,
+                       dir_path=self.root_dir)
+
+    def add_package(self, name, files, or_modes={}, and_modes={},
+                version='1.0', release='1', cache_dir=None, delta_mtime=None):
         """Add a package."""
         cache_dir = self.cache_dir if cache_dir is None else cache_dir
         if not os.path.isdir(cache_dir):
@@ -151,7 +156,7 @@ class Command():
         pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
                                 (name, version, release, os.uname().machine))
         with temp_cwd():
-            self.add_files(files, fmodes=fmodes)
+            self.add_files(files, or_modes=or_modes, and_modes=and_modes)
             with tarfile.open(pkg_name, 'w|xz') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
@@ -542,7 +547,7 @@ class UpdateTestCase(CommandsTestCase):
 
     def test_update_file_mode(self):
         # Check that a file is updated in the etc branch when its mode has
-        # been modified in a new package.
+        # been modified as user executable in a new package.
         files = {'a': 'content'}
         self.cmd.add_etc_files(files)
         self.cmd.add_package('package', files)
@@ -550,14 +555,30 @@ class UpdateTestCase(CommandsTestCase):
         self.check_content('etc', 'a', 'content')
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
-        fmodes = {'a': stat.S_IXUSR}
-        self.cmd.add_etc_files(files, fmodes=fmodes)
-        self.cmd.add_package('package', files, fmodes=fmodes)
+        or_modes = {'a': stat.S_IXUSR}
+        self.cmd.add_etc_files(files, or_modes=or_modes)
+        self.cmd.add_package('package', files, or_modes=or_modes)
         self.run_cmd('update', clear_stdout=False)
         self.check_output(is_in='Commits in the etc branch')
         self.check_output(is_in='Files added or updated from new package'
                                 ' versions')
         self.check_output(is_in=os.path.join(ROOT_SUBDIR, 'a'))
+
+    def test_readonly_file(self):
+        # Issue #15. Check that a file is not updated as a user change when
+        # it is readonly.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_content('etc', 'a', 'content')
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
+
+        readonly = {'a': ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)}
+        self.cmd.add_etc_files(files, and_modes=readonly)
+        self.cmd.add_package('package', files, and_modes=readonly)
+        self.run_cmd('update')
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
     def test_update_etc_removed(self):
         # Remove 'b' /etc file and it is removed from the etc branch on

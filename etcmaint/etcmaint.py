@@ -168,8 +168,13 @@ class EtcPath():
         return self._digest
 
     def __eq__(self, other):
-        return (isinstance(other, EtcPath) and self.digest == other.digest and
-                self.digest != b'' and self.st_mode == other.st_mode)
+        if (isinstance(other, EtcPath) and self.digest == other.digest and
+                self.digest != b''):
+            # Fix issue #15.
+            # Upgraded readonly files are reported as updated by the user.
+            return ((self.st_mode & stat.S_IXUSR) ==
+                   (other.st_mode & stat.S_IXUSR))
+        return False
 
 class GitRepo():
     """A git repository."""
