@@ -149,7 +149,7 @@ class EtcPath():
         if self._digest is None:
             try:
                 self.st_mode = self.path.lstat().st_mode
-            except FileNotFoundError:
+            except (FileNotFoundError, PermissionError):
                 self.st_mode = None
                 self._digest = b''
             else:
