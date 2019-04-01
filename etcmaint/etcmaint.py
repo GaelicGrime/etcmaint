@@ -30,6 +30,9 @@ EXCLUDE_PKGS = ''
 EXCLUDE_PREFIXES = 'ca-certificates, ssl/certs'
 ETCMAINT_BRANCHES = ['etc', 'etc-tmp', 'master', 'master-tmp', 'timestamps',
                      'timestamps-tmp']
+EMPTY_CHERRY_PICK_MSG = """An empty commit.
+This may happen when all the changes cherry-picked from the 'etc' branch
+have already been included in the 'master' branch as user changes."""
 
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
@@ -317,8 +320,15 @@ class GitRepo():
             self.commit(commit_msg)
 
     def cherry_pick(self, sha):
+        # --keep-redundant-commits:
+        # If a commit being cherry picked duplicates a commit already in the
+        # current history, it  will become empty. By default these redundant
+        # commits cause cherry-pick to stop so the user can examine the
+        # commit. This option overrides that behavior and creates an empty
+        # commit object.
         return run_cmd(self.git + GIT_USER_CONFIG +
-                    ['cherry-pick', '-x', sha], ignore_failure=True)
+                    ['cherry-pick', '-x', '--keep-redundant-commits',
+                     sha], ignore_failure=True)
 
     def tracked_files(self, branch):
         """A dictionary of the tracked files in this branch."""
@@ -454,8 +464,10 @@ class EtcMaint():
                     sha = line[len('commit '):]
                     diff_tree = self.repo.git_cmd(
                            'diff-tree --no-commit-id --name-only -r %s' % sha)
-                    self.print('\n'.join('    %s' % f for
-                                         f in sorted(diff_tree.splitlines())))
+                    rpaths = diff_tree.splitlines()
+                    lines = (sorted(rpaths) if rpaths else
+                             EMPTY_CHERRY_PICK_MSG.splitlines())
+                    self.print('\n'.join((' ' * 4 + l) for l in lines))
                 elif line:
                     self.print('  %s' % line)
         if print_footer:

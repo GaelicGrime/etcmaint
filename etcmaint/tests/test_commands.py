@@ -937,6 +937,34 @@ class UpdateTestCase(CommandsTestCase):
                                     'this is not an etcmaint repository'):
             self.run_cmd('update')
 
+    def test_empty_cherry_pick(self):
+        # Check that if a commit being cherry picked duplicates a 'user
+        # changes' commit already in the current history of the master-tmp
+        # branch, then the commit is empty.
+        content = ['line %d' % n for n in range(5)]
+        user_content = content[:]; user_content[0] = 'user line 0'
+        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
+        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
+        self.run_cmd('create')
+        self.check_results(['a'], ['a'])
+
+        user_content[3] = 'package line 3'
+        self.cmd.add_etc_files({'a': '\n'.join(user_content)})
+        content[3] = 'package line 3'
+        self.cmd.add_package('package_a', {'a': '\n'.join(content)})
+        self.run_cmd('update', clear_stdout=False)
+        self.check_results(['a'], ['a'])
+        self.check_content('master-tmp', 'a', dedent("""\
+                                               user line 0
+                                               line 1
+                                               line 2
+                                               package line 3
+                                               line 4"""))
+        self.check_output(is_in='empty commit')
+        self.assertEqual('',
+                         self.emt.repo.git_cmd('diff-tree --no-commit-id'
+                                               ' --name-only -r master-tmp'))
+
 class SyncTestCase(CommandsTestCase):
     def test_plain_sync(self):
         # Sync after a git cherry-pick.
