@@ -1,6 +1,12 @@
 Release history
 ===============
 
+Version 0.6
+-----------
+
+* Fix a crash when an /etc file becomes unreadable by ``user`` after a pacman
+  upgrade.
+
 Version 0.5
 -----------
 
