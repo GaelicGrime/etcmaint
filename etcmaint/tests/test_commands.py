@@ -580,6 +580,20 @@ class UpdateTestCase(CommandsTestCase):
         self.run_cmd('update')
         self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
 
+    def test_not_readable_file(self):
+        # Issue #16. No crash after an /etc file has been made not readable.
+        files = {'a': 'content'}
+        self.cmd.add_etc_files(files)
+        self.cmd.add_package('package', files)
+        self.run_cmd('create')
+        self.check_content('etc', 'a', 'content')
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
+
+        not_readable = {'a': ~(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)}
+        self.cmd.add_etc_files(files, and_modes=not_readable)
+        self.run_cmd('update')
+        self.check_results([], ['a'], ['etc', 'master', 'timestamps'])
+
     def test_update_etc_removed(self):
         # Remove 'b' /etc file and it is removed from the etc branch on
         # 'update'.

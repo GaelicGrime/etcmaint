@@ -773,7 +773,10 @@ class EtcMaint():
         to_check_in_master = []
         for rpath in etc_files:
             if rpath in etc_tracked:
-                if etc_files[rpath] != etc_tracked[rpath]:
+                # Issue #16. Do not add an /etc file that has been made not
+                # readable after a pacman upgrade.
+                if (etc_files[rpath].digest != b'' and
+                        etc_files[rpath] != etc_tracked[rpath]):
                     to_check_in_master.append(rpath)
 
         master_tracked = self.repo.tracked_files('master-tmp')
