@@ -1,6 +1,11 @@
 Release history
 ===============
 
+Version 0.7
+-----------
+
+* Support the z-standard compression scheme.
+
 Version 0.6
 -----------
 

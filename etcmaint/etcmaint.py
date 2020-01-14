@@ -17,7 +17,7 @@ import subprocess
 from textwrap import dedent, wrap
 from collections import namedtuple
 
-__version__ = '0.6'
+__version__ = '0.7'
 pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
 EXTENSIONS = ('xz', 'zst', 'zstd')
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
