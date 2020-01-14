@@ -5,7 +5,7 @@ unittest:
         - adduser --disabled-password --gecos '' git_user
         - su --command='git config --global user.name git_user' git_user
         - su --command='git config --global user.email git_user@gitlab.com' git_user
-        - su --command='python -m pip install zstandard' git_user
+        - su --command='python -m pip install --user zstandard' git_user
         - su --command='python -m unittest -v' git_user
     only:
         - pushes
