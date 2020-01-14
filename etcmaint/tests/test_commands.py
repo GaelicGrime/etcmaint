@@ -5,7 +5,6 @@ import os
 import io
 import stat
 import tempfile
-import tarfile
 import time
 import shutil
 import unittest
@@ -17,8 +16,10 @@ from unittest import TestCase, skipIf
 from unittest.mock import patch
 
 from etcmaint.etcmaint import (ETCMAINT_BRANCHES, change_cwd, etcmaint,
-                               ROOT_SUBDIR, EtcPath, EmtError, EtcMaint)
+                               ROOT_SUBDIR, EtcPath, EmtError, EtcMaint,
+                               tarfile_open)
 
+EXTENSION = 'zst'
 ROOT_DIR = 'root'
 REPO_DIR = 'repo'
 CACHE_DIR = 'cache'
@@ -153,11 +154,11 @@ class Command():
         cache_dir = self.cache_dir if cache_dir is None else cache_dir
         if not os.path.isdir(cache_dir):
             os.makedirs(cache_dir)
-        pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.xz' %
-                                (name, version, release, os.uname().machine))
+        pkg_name = os.path.join(cache_dir, '%s-%s-%s-%s.pkg.tar.%s' %
+                    (name, version, release, os.uname().machine, EXTENSION))
         with temp_cwd():
             self.add_files(files, or_modes=or_modes, and_modes=and_modes)
-            with tarfile.open(pkg_name, 'w|xz') as tar:
+            with tarfile_open(pkg_name, EXTENSION, mode='w') as tar:
                 tar.add(ROOT_SUBDIR)
         # Update the package modification and access times.
         if delta_mtime is None:

@@ -19,6 +19,7 @@ from collections import namedtuple
 
 __version__ = '0.6'
 pgm = os.path.basename(sys.argv[0].rstrip(os.sep))
+EXTENSIONS = ('xz', 'zst', 'zstd')
 RW_ACCESS = stat.S_IWUSR | stat.S_IRUSR
 FIRST_COMMIT_MSG = 'First etcmaint commit'
 CHERRY_PICK_COMMIT_MSG = ('Files updated from new packages versions and'
@@ -140,6 +141,30 @@ def threadsafe_makedirs():
         yield
     finally:
         os.makedirs = saved_makedirs
+
+@contextlib.contextmanager
+def tarfile_open(name, comptype, mode='r'):
+    import tarfile
+
+    if comptype not in ('zst', 'zstd'):
+        with tarfile.open(name, '%s:%s' % (mode, comptype)) as tar:
+            yield tar
+    else:
+        import zstandard as zstd
+
+        if mode == 'r':
+            compressor = zstd.ZstdDecompressor().stream_reader
+        elif mode == 'w':
+            compressor = zstd.ZstdCompressor().stream_writer
+        else:
+            raise ValueError('mode must be "r" or "w"')
+
+        # Currently z-standard only supports stream-like file objects.
+        # See https://github.com/indygreg/python-zstandard/issues/23.
+        with open(name, '%sb' % mode) as f:
+            with compressor(f) as fobj:
+                with tarfile.open(mode="%s|" % mode, fileobj=fobj) as tar:
+                    yield tar
 
 class EtcPath():
     def __init__(self, basedir, rpath):
@@ -833,6 +858,8 @@ class EtcMaint():
 
     def list_new_packages(self, cache_dir):
         """Build the list of new package files."""
+        import re
+
         def newer_exists_in(packages, name, st_mtime, read_content=True):
             if name in packages:
                 if read_content:
@@ -845,13 +872,14 @@ class EtcMaint():
                 return float(st_mtime) <= float(timestamp)
             return False
 
+        re_validext = re.compile(r'.*\.pkg\.tar\.(%s)' % '|'.join(EXTENSIONS))
         exclude_pkgs_len = len(self.exclude_pkgs)
         excluded = []
         # 'timestamps' and 'tracked:'
         # Dictionary {package name: PosixPath with timestamp as content}
         timestamps = {}
         tracked = self.repo.tracked_files('timestamps-tmp')
-        # Dictionary {package name: PosixPath of *.pkg.tar.xz pacman file}
+        # Dictionary {package name: PosixPath of pacman file}
         new_pkgs = {}
         self.repo.checkout('timestamps-tmp')
 
@@ -866,7 +894,7 @@ class EtcMaint():
                     continue
 
                 fullname = direntry.name
-                if not fullname.endswith('.pkg.tar.xz'):
+                if not re_validext.match(fullname):
                     continue
 
                 # "Version tags may not include hyphens!" quoting from
@@ -914,42 +942,35 @@ class EtcMaint():
         Return a dictionary mapping extracted configuration file names to the
         EtcPath instance of the 'original' file before the extraction.
         """
-        import tarfile
         from concurrent.futures import ThreadPoolExecutor
 
-        def etc_files_filter(members):
-            for tinfo in members:
-                fname = tinfo.name
-                if (fname.startswith(ROOT_SUBDIR) and
-                        (tinfo.isfile() or tinfo.issym() or tinfo.islnk()) and
-                        fname not in self.exclude_files):
-                    yield tinfo
-
         def extract_from(pkg):
-            tar = tarfile.open(str(pkg), mode='r:xz')
-            tarinfos = list(etc_files_filter(tar.getmembers()))
-            for tinfo in tarinfos:
-                path = EtcPath(self.repodir, tinfo.name)
-                # Remember the sha1 of the existing file, if it exists, before
-                # extracting it from the tarball (EtcPath.digest is lazily
-                # evaluated).
-                not_used = path.digest
-                extracted[tinfo.name] = path
+            with tarfile_open(str(pkg), pkg.suffix[1:]) as tar:
+                for tinfo in tar:
+                    fname = tinfo.name
+                    if (fname.startswith(ROOT_SUBDIR) and
+                            (tinfo.isfile() or tinfo.issym() or tinfo.islnk())
+                            and fname not in self.exclude_files):
+                        path = EtcPath(self.repodir, tinfo.name)
+                        # Remember the sha1 of the existing file, if it
+                        # exists, before extracting it from the tarball
+                        # (EtcPath.digest is lazily evaluated).
+                        not_used = path.digest
+                        extracted[tinfo.name] = path
 
-                # The Python tarfile implementation fails to create symlinks,
-                # see also issue bpo-10761.
-                if tinfo.issym():
-                    abspath = os.path.join(self.repodir, tinfo.name)
-                    try:
-                        if os.path.lexists(abspath):
-                            os.unlink(abspath)
-                    except OSError as err:
-                        warn(err)
-            tar.extractall(self.repodir, members=tarinfos)
+                        # The Python tarfile implementation fails to create
+                        # symlinks, see also issue bpo-10761.
+                        if tinfo.issym():
+                            abspath = os.path.join(self.repodir, tinfo.name)
+                            try:
+                                if os.path.lexists(abspath):
+                                    os.unlink(abspath)
+                            except OSError as err:
+                                warn(err)
+                        tar.extract(tinfo, self.repodir)
             print(pkg.name)
 
         extracted = {}
-        print('Extracting configuration files from packages')
         max_workers = len(os.sched_getaffinity(0)) or 4
         # Extracting from tarfiles is not thread safe (see msg315067 in bpo
         # issue https://bugs.python.org/issue23649).
@@ -999,9 +1020,14 @@ class EtcMaint():
         master_tracked = self.repo.tracked_files('master-tmp')
         etc_tracked = self.repo.tracked_files('etc-tmp')
         packages = self.list_new_packages(self.cache_dir)
+        print('Extracting configuration files from %d new package files' %
+              len(packages), end='')
         if self.aur_dir is not None:
-            packages = itertools.chain(packages,
-                                       self.list_new_packages(self.aur_dir))
+            aur_packages = self.list_new_packages(self.aur_dir)
+            print(' and %d new AUR package files' % len(aur_packages))
+            packages = itertools.chain(packages, aur_packages)
+        else:
+            print()
         self.repo.checkout('etc-tmp')
         original_files = self.extract(packages, etc_tracked)
 
