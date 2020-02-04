@@ -942,6 +942,11 @@ class EtcMaint():
         Return a dictionary mapping extracted configuration file names to the
         EtcPath instance of the 'original' file before the extraction.
         """
+        # Lazy imports in a thread are actively discouraged,
+        # see bpo issue 39430.
+        # Do the import here first before starting the threads.
+        import tarfile
+        import zstandard
         from concurrent.futures import ThreadPoolExecutor
 
         def extract_from(pkg):
