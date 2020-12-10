@@ -8,7 +8,7 @@ import stat
 import argparse
 import pathlib
 import inspect
-import configparser
+import re
 import hashlib
 import itertools
 import shutil
@@ -37,6 +37,10 @@ have already been included in the 'master' branch as user changes."""
 
 # The subdirectory of '--root-dir'.
 ROOT_SUBDIR = 'etc'
+
+RE_CACHEDIR = r'^\s*\#?\s*CacheDir\s*=\s*(?P<CacheDir>.*(\w|/))\s*$' \
+              r'# CacheDir = possibly white space separated pathname'
+re_cachedir = re.compile(RE_CACHEDIR, re.VERBOSE | re.MULTILINE)
 
 class EmtError(Exception): pass
 
@@ -424,10 +428,17 @@ class EtcMaint():
         self.mode = '[dry-run] ' if self.dry_run else ''
 
         if hasattr(self, 'cache_dir') and self.cache_dir is None:
-            cfg = configparser.ConfigParser(allow_no_value=True)
             with open('/etc/pacman.conf') as f:
-                cfg.read_file(f)
-            self.cache_dir = cfg['options']['CacheDir']
+                for line in f:
+                    matchobj = re_cachedir.match(line)
+                    if matchobj:
+                        self.cache_dir = matchobj.group('CacheDir')
+                        break
+                else:
+                    self.cache_dir = '/var/cache/pacman/pkg/'
+                    print('Cannot get CacheDir from pacman.conf, '
+                          'using the hard coded value %s' %
+                          self.cache_dir)
 
         Etc_commits = namedtuple('Etc_commits',
                                  ['added', 'cherry_pick', 'removed'])
